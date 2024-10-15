@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Data Visualization</title>
+    
+    <!-- Chart.js Library -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <!-- CSS Stylesheet -->
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div class="control-panel">
+        <label for="maxForce">Max Force:</label>
+        <input type="range" id="maxForce" name="maxForce" min="10" max="100" value="50">
+        <span id="maxForceValue">50</span>
+    </div>
+
+    <h1>Real-Time Data Visualization</h1>
+    <div id="controls">
+        <button id="startButton">Start Data Stream</button>
+    </div>
+    <div id="chart-container">
+        <canvas id="myChart"></canvas>
+    </div>
+
+    <!-- JavaScript File -->
+    <script src="js/script-witout-iot.js"></script>
+</body>
+</html>
