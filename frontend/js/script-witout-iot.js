@@ -71,7 +71,7 @@ startButton.addEventListener("click", () => {
 
     // Buffer for incoming data
     const dataBuffer = [];
-    const bufferSize = 100; // Adjust the buffer size for averaging
+    const bufferSize = 1000; // Number of messages to accumulate before processing
 
     socket.onopen = function () {
         console.log("WebSocket connection established");
@@ -84,35 +84,26 @@ startButton.addEventListener("click", () => {
         // Ensure receivedData.value is a valid number
         if (receivedData && receivedData[1]) {
             const randomNumber = parseFloat(receivedData[1]);
-            if (randomNumber !== null && !isNaN(randomNumber)) {
+            if (!isNaN(randomNumber)) {
                 // Add new data point to the buffer
                 dataBuffer.push(randomNumber);
 
-                // Check if we have enough data to calculate an average
+                // Check if we have enough data to process or if a certain time has passed
                 if (dataBuffer.length >= bufferSize) {
-                    // Calculate average
-                    const sum = dataBuffer.reduce((acc, value) => acc + value, 0);
-                    const average = sum / bufferSize;
-
-                    // Add average to the chart data
-                    myChart.data.datasets[0].data.push(average);
-                    myChart.data.labels.push(myChart.data.labels.length + 1); // Append a new label for each data point
-
-                    // Update y-axis if necessary
-                    const maxDataValue = Math.max(...myChart.data.datasets[0].data, 100);
-                    myChart.options.scales.y.suggestedMax = maxDataValue > 100 ? maxDataValue : 100;
-
-                    // Update the chart
-                    myChart.update();
-
-                    // Clear the buffer for the next set of data points
-                    dataBuffer.length = 0; // Reset the buffer
+                    processBuffer(dataBuffer);
                 }
             } else {
-                console.warn("Received invalid number:", receivedData.value);
+                console.warn("Received invalid number:", receivedData[1]);
             }
-        };
+        }
     };
+
+    // Periodically check the buffer for processing
+    setInterval(() => {
+        if (dataBuffer.length > 0) {
+            processBuffer(dataBuffer);
+        }
+    }, 1000); // Check every second
 
     socket.onclose = function () {
         console.log("WebSocket connection closed");
@@ -122,6 +113,28 @@ startButton.addEventListener("click", () => {
         console.error("WebSocket error:", error);
     };
 });
+
+// Function to process the buffer and update the chart
+function processBuffer(buffer) {
+    console.log("Updating chart", buffer.length);
+    // Calculate average
+    const sum = buffer.reduce((acc, value) => acc + value, 0);
+    const average = sum / buffer.length; // Use the actual length of the buffer
+
+    // Add average to the chart data
+    myChart.data.datasets[0].data.push(average);
+    myChart.data.labels.push(myChart.data.labels.length + 1); // Append a new label for each data point
+
+    // Update y-axis if necessary
+    const maxDataValue = Math.max(...myChart.data.datasets[0].data, 100);
+    myChart.options.scales.y.suggestedMax = maxDataValue > 100 ? maxDataValue : 100;
+
+    // Update the chart
+    myChart.update();
+
+    // Clear the buffer for the next set of data points
+    buffer.length = 0; // Reset the buffer
+}
 
 // Add event listener for maxForce slider
 const maxForceSlider = document.getElementById("maxForce");

@@ -5,6 +5,8 @@ import uvicorn
 import threading
 import asyncio
 import json
+import time
+import queue
 
 app = FastAPI()
 
@@ -23,21 +25,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global variables
 connected_clients = []
 buffered_messages = []
+message_queue = queue.Queue()  # Queue for incoming messages
+lock = threading.Lock()
 
-async def broadcast_message(message):
-    """Send a message to all connected WebSocket clients."""
+# Message rate variables
+message_count = 0
+batchSize = 1000  # Define your desired batch size
+
+async def broadcast_message(messages):
+    """Send a batch of messages to all connected WebSocket clients."""
     if connected_clients:
+        message_data = json.dumps(messages)  # Convert the list of messages to JSON
         for client in connected_clients:
             try:
-                await client.send_text(message)  # Await the send_text method
+                await client.send_text(message_data)  # Send the batch message
             except Exception as e:
                 print(f"Error sending message to client: {e}")
     else:
         # Buffer the message if no clients are connected
-        print(f"Pushed message to buffer: {message}")
-        buffered_messages.append(message)
+        buffered_messages.extend(messages)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -76,11 +85,39 @@ def on_connect(client, userdata, flags, rc):
 
 def on_message(client, userdata, msg):
     """Callback when a message is received from the broker."""
+    global message_count
     message = msg.payload.decode()
-    print(f"Received message: {message} on topic {msg.topic}")
+    
+    # Add message to the queue for batch processing
+    message_queue.put(message)
+    
+    with lock:
+        message_count += 1  # Increment message count
 
-    # Create a new task to broadcast the message asynchronously
-    asyncio.run(broadcast_message(message))  # Run the coroutine
+def process_message_batches():
+    """Process messages from the queue and send them in batches."""
+    while True:
+        messages = []
+        try:
+            for _ in range(1000):  # Collect up to 1000 messages for batch processing
+                messages.append(message_queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        if messages:
+            print("size of messages",len(messages))
+            asyncio.run(broadcast_message(messages))  # Send batch of messages
+
+        time.sleep(1)  # Control the frequency of batch processing
+
+def monitor_message_rate():
+    """Monitor the number of messages received per second."""
+    global message_count
+    while True:
+        time.sleep(1)  # Wait for 1 second
+        with lock:
+            print(f"Messages received in the last second: {message_count}")
+            message_count = 0  # Reset the counter for the next second
 
 def start_mqtt_client():
     """Start the MQTT client."""
@@ -98,4 +135,9 @@ def start_mqtt_client():
 if __name__ == "__main__":
     mqtt_thread = threading.Thread(target=start_mqtt_client)
     mqtt_thread.start()  # Start the MQTT client in a separate thread
+
+    # Start the message processing and monitoring threads
+    threading.Thread(target=process_message_batches, daemon=True).start()
+    threading.Thread(target=monitor_message_rate, daemon=True).start()
+
     uvicorn.run(app, host="127.0.0.1", port=8000)
