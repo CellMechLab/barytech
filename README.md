@@ -1,4 +1,4 @@
-# **IoT Project**
+# **Schaefer nanoindenter project**
 
 ## **Project Overview**
 
