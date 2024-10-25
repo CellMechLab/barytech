@@ -33,7 +33,6 @@ lock = threading.Lock()
 
 # Message rate variables
 message_count = 0
-batchSize = 1000  # Define your desired batch size
 
 async def broadcast_message(messages):
     """Send a batch of messages to all connected WebSocket clients."""
@@ -55,9 +54,10 @@ async def websocket_endpoint(websocket: WebSocket):
     print(f"Connected client: {websocket}")
 
     # Send any buffered messages to the newly connected client
-    for msg in buffered_messages:
-        print(f"Sending buffered msg: {msg}")
-        await websocket.send_text(msg)
+    if buffered_messages:
+        buffered_data = json.dumps(buffered_messages)  # Convert the buffered messages to JSON array
+        await websocket.send_text(buffered_data)  # Send all buffered messages at once
+        print(f"Sent buffered messages: {len(buffered_messages)}")
 
     try:
         while True:
@@ -99,16 +99,15 @@ def process_message_batches():
     while True:
         messages = []
         try:
-            for _ in range(1000):  # Collect up to 1000 messages for batch processing
+            for _ in range(100):  # Collect up to 100 messages for batch processing
                 messages.append(message_queue.get_nowait())
         except queue.Empty:
             pass
 
         if messages:
-            print("size of messages",len(messages))
             asyncio.run(broadcast_message(messages))  # Send batch of messages
 
-        time.sleep(1)  # Control the frequency of batch processing
+        time.sleep(0.1)  # Control the frequency of batch processing
 
 def monitor_message_rate():
     """Monitor the number of messages received per second."""
@@ -127,7 +126,7 @@ def start_mqtt_client():
     mqtt_client.on_message = on_message
 
     try:
-        mqtt_client.connect("test.mosquitto.org", 1883, keepalive=60)
+        mqtt_client.connect("localhost", 1883, keepalive=60)
         mqtt_client.loop_start()  # Start the MQTT client loop
     except Exception as e:
         print(f"Could not connect to MQTT Broker: {e}")
