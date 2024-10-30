@@ -5,6 +5,7 @@ and the client then subscribes to receive the incoming messages from the porduce
 MQTT QOS=1 was set in these scripts to ensure duplicates are received in case of network disruptions.
 
 ------------PUBLISHER--------------
+
 To run the publisher:
 
 Open a terminal (or WSL). I used a WSL on my computer to run this.
@@ -18,6 +19,7 @@ Run the script using:
 NOTE: MAKE SURE TO SET THE CORRECT IP ADDRESS IN THE SCRIPT.
 
 ------------CLIENT--------------
+
 To run the client:
 
 Open a terminal. The client and broker were both run on the raspberry pi in my case.
@@ -31,6 +33,7 @@ Run the script using:
 
 
 ------------MQTT BROKER--------------
+
 To start the mosquitto broker:
 
 Run the following command assuming its locally installed on the device.
