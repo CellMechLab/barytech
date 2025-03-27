@@ -1,0 +1,14 @@
+uvicorn
+paho-mqtt
+sqlalchemy
+fastapi
+passlib
+python-jose
+python-multipart
+bcrypt
+alembic
+asyncpg 
+greenlet
+pydantic-settings
+pg8000
+'uvicorn[standard]'

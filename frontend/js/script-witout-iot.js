@@ -25,12 +25,12 @@ const myChart = new Chart(ctx, {
                     text: 'Data Points'
                 },
                 ticks: {
-                    autoSkip: false, // Disable automatic skipping of ticks to show all labels
-                    maxRotation: 90, // Rotate labels if they overlap
-                    minRotation: 45 // Minimum rotation for better visibility
+                    autoSkip: false,
+                    maxRotation: 90,
+                    minRotation: 45
                 },
                 grid: {
-                    drawOnChartArea: false // Hide grid lines for a cleaner look
+                    drawOnChartArea: false
                 }
             },
             y: {
@@ -58,39 +58,34 @@ const myChart = new Chart(ctx, {
 });
 
 let socket; // WebSocket variable
+let retryCount = 0;
+const maxRetries = 10;
+const bufferSize = 1000;  // Messages to buffer before processing
+const dataBuffer = [];
 
-const startButton = document.getElementById("startButton");
+const client_id = "ID123456789";
 
-startButton.addEventListener("click", () => {
-    // Disable the button after clicking
-    startButton.disabled = true;
-    startButton.textContent = "Data Stream Started";
-
-    // Initialize WebSocket connection
+// Function to connect WebSocket and handle reconnections
+function connectWebSocket() {
     socket = new WebSocket("ws://127.0.0.1:8000/ws");
-
-    // Buffer for incoming data
-    const dataBuffer = [];
-    const bufferSize = 1000; // Number of messages to accumulate before processing
 
     socket.onopen = function () {
         console.log("WebSocket connection established");
+        retryCount = 0; // Reset retry count
+        socket.send(JSON.stringify({ client_id: client_id }));
     };
 
     socket.onmessage = function (event) {
         console.log("Received data");
         const receivedData = event.data.match(/Random data: (\d+)/);
 
-        // Ensure receivedData.value is a valid number
         if (receivedData && receivedData[1]) {
             const randomNumber = parseFloat(receivedData[1]);
             if (!isNaN(randomNumber)) {
-                // Add new data point to the buffer
-                dataBuffer.push(randomNumber);
+                dataBuffer.push(randomNumber);  // Add new data point to buffer
 
-                // Check if we have enough data to process or if a certain time has passed
                 if (dataBuffer.length >= bufferSize) {
-                    processBuffer(dataBuffer);
+                    processBuffer(dataBuffer);  // Process if buffer is full
                 }
             } else {
                 console.warn("Received invalid number:", receivedData[1]);
@@ -98,32 +93,37 @@ startButton.addEventListener("click", () => {
         }
     };
 
-    // Periodically check the buffer for processing
-    setInterval(() => {
-        if (dataBuffer.length > 0) {
-            processBuffer(dataBuffer);
-        }
-    }, 1000); // Check every second
-
     socket.onclose = function () {
-        console.log("WebSocket connection closed");
+        console.log("WebSocket connection closed, retrying...");
+        if (retryCount < maxRetries) {
+            retryCount++;
+            setTimeout(connectWebSocket, 2000);  // Retry connection after 2 seconds
+        } else {
+            console.error("Max retries reached, unable to reconnect.");
+        }
     };
 
     socket.onerror = function (error) {
         console.error("WebSocket error:", error);
     };
-});
+}
+
+// Automatically connect WebSocket when the page loads
+window.onload = function () {
+    connectWebSocket();
+};
 
 // Function to process the buffer and update the chart
 function processBuffer(buffer) {
     console.log("Updating chart", buffer.length);
+
     // Calculate average
     const sum = buffer.reduce((acc, value) => acc + value, 0);
-    const average = sum / buffer.length; // Use the actual length of the buffer
+    const average = sum / buffer.length;
 
     // Add average to the chart data
     myChart.data.datasets[0].data.push(average);
-    myChart.data.labels.push(myChart.data.labels.length + 1); // Append a new label for each data point
+    myChart.data.labels.push(myChart.data.labels.length + 1);
 
     // Update y-axis if necessary
     const maxDataValue = Math.max(...myChart.data.datasets[0].data, 100);
@@ -133,22 +133,30 @@ function processBuffer(buffer) {
     myChart.update();
 
     // Clear the buffer for the next set of data points
-    buffer.length = 0; // Reset the buffer
+    buffer.length = 0;
 }
 
-// Add event listener for maxForce slider
+// Max Force Slider event listener
 const maxForceSlider = document.getElementById("maxForce");
 const maxForceValue = document.getElementById("maxForceValue");
 
 maxForceSlider.addEventListener("input", () => {
     maxForceValue.textContent = maxForceSlider.value;
-    console.log("sending max force");
-    // Send the new max force to the backend via WebSocket
+    console.log("Sending max force");
+
     const params = {
         parameter: "maxForce",
         value: parseInt(maxForceSlider.value)
     };
+
     if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(params));
+        socket.send(JSON.stringify(params));  // Send max force value to server
     }
 });
+
+// Periodically process buffer if not full
+setInterval(() => {
+    if (dataBuffer.length > 0) {
+        processBuffer(dataBuffer);
+    }
+}, 1000);  // Process every 1 second

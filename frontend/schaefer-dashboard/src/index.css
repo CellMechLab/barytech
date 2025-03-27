@@ -1,0 +1,83 @@
+@import url("https://fonts.googleapis.com/css2?family=Source+Sans+Pro:wght@400;600;700&display=swap");
+
+
+html,
+body,
+#root,
+.app,
+.content {
+  height: 100%;
+  width: 100%;
+  font-family: "Source Sans Pro", sans-serif;
+  /* background-color: whitesmoke; */
+}
+
+.app {
+  display: flex;
+  position: relative;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+/* Track */
+::-webkit-scrollbar-track {
+  background: rgb(250, 250, 250);
+}
+
+/* Handle */
+::-webkit-scrollbar-thumb {
+  background: #888;
+}
+
+/* Handle on hover */
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-family: Arial, sans-serif;
+}
+
+label {
+  font-size: 1rem;
+  color: #666;
+  margin-bottom: 8px;
+}
+
+.vertical-slider {
+  writing-mode: bt-lr;       /* Makes slider vertical */
+  -webkit-appearance: slider-vertical;
+  width: 8px;
+  height: 90%;
+  background: #e0e0e0;
+  border-radius: 5px;
+  outline: none;
+}
+
+.vertical-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  background-color: #00aaff;
+  border-radius: 60%;
+  width: 25px;
+  height: 25px;
+  cursor: pointer;
+}
+
+.vertical-slider::-moz-range-thumb {
+  background-color: #00aaff;
+  border-radius: 60%;
+  width: 25px;
+  height: 25px;
+  cursor: pointer;
+}
+
+.slider-value {
+  margin-top: 8px;
+  font-size: 1.2rem;
+  color: #333;
+}
