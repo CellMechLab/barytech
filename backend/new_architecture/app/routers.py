@@ -138,3 +138,22 @@ async def delete_device_data(
         await db.commit()
 
         return {"detail": f"{len(device_data_entries)} device data entries deleted successfully."}
+
+
+from fastapi.responses import FileResponse
+import os
+from app.db import export_device_data_to_hdf5  
+
+@router.get("/export/device_data")
+async def download_device_data():
+    file_path = "device_data.hdf5"
+    await export_device_data_to_hdf5(file_path)
+
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Export failed")
+
+    return FileResponse(
+        path=file_path,
+        filename="device_data.hdf5",
+        media_type="application/octet-stream"
+    )

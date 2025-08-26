@@ -27,5 +27,5 @@ app.add_middleware(
 if __name__ == "__main__":
     # mqtt_thread = threading.Thread(target=start_mqtt_client)
     # mqtt_thread.start()
-
     uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)
+
