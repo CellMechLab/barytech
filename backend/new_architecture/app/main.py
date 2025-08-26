@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.message_processor import broadcast_messages, batch_processor
+from app.message_processor import broadcast_messages, batch_processor, global_message_processor
+from app.mqtt_client import process_raw_messages
 from app.mqtt_client import start_mqtt_client,get_mqtt_client
 from fastapi import WebSocket, WebSocketDisconnect
 from app.db import get_db, save_client_session, mark_client_disconnected
@@ -54,9 +55,9 @@ app.include_router(graphql_app, prefix="/graphql")
 async def startup_event():
     import app.shared_state
     app.shared_state.main_event_loop = asyncio.get_event_loop()
-    # start_mqtt_client()
-    # asyncio.create_task(broadcast_messages())
-    # asyncio.create_task(batch_processor())
+    
+    # Start the raw message processor for high-throughput message handling
+    asyncio.create_task(process_raw_messages())
 
     mqtt_thread = threading.Thread(target=start_mqtt_client)
     mqtt_thread.start()
@@ -74,19 +75,16 @@ async def websocket_endpoint(websocket: WebSocket):
     # Use the async database session
     async with get_db() as db:
         await websocket.accept()
+        # Use a default client_id if none is provided
+        client_id = "1"  # Default client ID for all connections
         try:
             first_message = await websocket.receive_text()
             client_data = json.loads(first_message)
-            client_id = client_data.get("client_id")
+            if client_data.get("client_id"):
+                client_id = str(client_data.get("client_id"))  # Ensure it's a string
         except Exception as e:
-            print("Failed to receive client_id:", e)
-            await websocket.close()
-            return
-        
-        if not client_id:
-            print("client_id missing; closing connection")
-            await websocket.close()
-            return
+            print("No client_id provided, using default:", e)
+            # Continue with default client_id
         
         print(f"Connected client ID: {client_id}")
         
@@ -94,8 +92,11 @@ async def websocket_endpoint(websocket: WebSocket):
         await save_client_session(db, client_id, str(websocket))
         
         # Add WebSocket connection to the dictionary
-        websocket_connections[client_id] = set()  # When a user connects
+        if client_id not in websocket_connections:
+            websocket_connections[client_id] = set()
         websocket_connections[client_id].add(websocket)
+        print(f"WebSocket added to connections. Total connections for {client_id}: {len(websocket_connections[client_id])}")
+        print(f"All websocket_connections: {websocket_connections}")
         
         try:
             while True:
@@ -151,7 +152,7 @@ async def websocket_endpoint(websocket: WebSocket):
 def handle_save_flag(flag):
     import app.shared_state
     app.shared_state.save_flag = flag
-    if save_flag:
+    if flag:
         print("Save data action triggered!")
     else:
         print("Save data action disabled.")

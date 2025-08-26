@@ -7,10 +7,11 @@ from fastapi import HTTPException
 from contextlib import asynccontextmanager
 import logging
 from sqlalchemy import insert
+import pandas as pd
 
 logging.basicConfig(level=logging.DEBUG)
 # SQLite async database URL (you can use other databases like PostgreSQL or MySQL)
-DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/schaefer"
+DATABASE_URL = "postgresql+asyncpg://postgres:calculator1@localhost:5432/schaefer"
 
 # Create an async engine
 async_engine = create_async_engine(
@@ -112,7 +113,7 @@ async def get_device_data_by_device_id(db: AsyncSession, device_id: str):
 async def save_client_session(db: AsyncSession, client_id: int, websocket_id: str):
     """Save or update a client session."""
     result = await db.execute(
-        select(ClientSession).where(ClientSession.client_id == client_id)
+        select(ClientSession).where(ClientSession.client_id == str(client_id))
     )
     session = result.scalars().first()
     if session:
@@ -127,7 +128,7 @@ async def save_client_session(db: AsyncSession, client_id: int, websocket_id: st
 async def mark_client_disconnected(db: AsyncSession, client_id: str):
     """Mark a client as disconnected."""
     result = await db.execute(
-        select(ClientSession).where(ClientSession.client_id == client_id)
+        select(ClientSession).where(ClientSession.client_id == str(client_id))
     )
     session = result.scalars().first()
     if session:
@@ -148,3 +149,52 @@ async def get_user_id_by_device_id(db, device_id: str) -> str:
     if not user_id:
         raise ValueError(f"No user found for given device_id: {device_id}")
     return user_id
+
+
+import os
+import h5py
+import numpy as np
+
+async def export_device_data_to_hdf5(file_path: str = "data/device_data.hdf5"):
+    """Export DeviceData to an HDF5 file with curve0/segment0/Force,Z structure."""
+    # Ensure data directory exists
+    os.makedirs("data", exist_ok=True)
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(DeviceData))
+        data = result.scalars().all()
+
+        if not data:
+            print("No data found in device_data table.")
+            raise HTTPException(status_code=404, detail="No device data available to export.")
+
+        # Convert SQLAlchemy objects to list of dicts
+        records = [d.__dict__ for d in data]
+        for record in records:
+            record.pop('_sa_instance_state', None)
+
+        # Collect force and z values for a single curve
+        force_values = []
+        z_values = []
+        for record in records:
+            force = record.get("force", None)  # Adjust field name if different
+            z = record.get("displacement", None)  # Adjust field name if different
+            if force is not None and z is not None:  # Skip invalid records
+                force_values.append(force)
+                z_values.append(z)
+
+        if not force_values or not z_values:
+            print("No valid force or z data found.")
+            raise HTTPException(status_code=400, detail="No valid force or z data to export.")
+
+        # Create HDF5 file
+        with h5py.File(file_path, "w") as f:
+            # Create curve0 group
+            curve_group = f.create_group("curve0")
+            # Create segment0 group
+            segment_group = curve_group.create_group("segment0")
+            # Create Force and Z datasets
+            segment_group.create_dataset("Force", data=np.array(force_values, dtype=float))
+            segment_group.create_dataset("Z", data=np.array(z_values, dtype=float))
+
+        print(f"Exported {len(force_values)} records to {file_path}")

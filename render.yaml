@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: barytech-backend
+    env: python
+    plan: starter
+    buildCommand: cd backend/new_architecture && pip install -r requirements.txt
+    startCommand: cd backend/new_architecture && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        value: postgresql://postgres:calculator1@localhost:5432/schaefer
+      - key: MQTT_BROKER_URL
+        value: localhost
+      - key: MQTT_BROKER_PORT
+        value: 1883
+      - key: PYTHON_VERSION
+        value: 3.10.0

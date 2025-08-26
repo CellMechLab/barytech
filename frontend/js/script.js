@@ -51,6 +51,10 @@ startButton.addEventListener("click", () => {
 
     socket.onopen = function () {
         console.log("WebSocket connection established");
+        // Send client_id as required by the backend
+        socket.send(JSON.stringify({
+            client_id: "1"
+        }));
     };
 
     socket.onmessage = function (event) {
