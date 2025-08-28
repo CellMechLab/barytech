@@ -15,6 +15,7 @@ import ProtectedRoute from "./components/routes/ProtectedRoute"; // Import Prote
 import Devices from "./components/devices/index";
 import DeviceData from "./components/deviceData/index";
 import AddDevice from "./components/form/index";
+import AdminPanel from "./components/admin/AdminPanel"; // Import AdminPanel
 import { SaveProvider } from "./context/SaveContext";
 
 const App = () => {
@@ -47,6 +48,7 @@ const App = () => {
                       <Route path="/devices" element={<Devices />} />
                       <Route path="/device-data" element={<DeviceData />} />
                       <Route path="/add-device" element={<AddDevice />} />
+                      <Route path="/admin" element={<AdminPanel />} />
                     </Route>
                   </Routes>
                 </DndProvider>

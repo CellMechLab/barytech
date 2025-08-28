@@ -1,26 +1,75 @@
 import asyncio
-import queue
-import time
 import json
-from app.db import save_device_data_batch, get_db, get_user_id_by_device_id
-from app.websocket_manager import websocket_connections  # Import the WebSocket connections dictionary
-import app.shared_state
+import time
+import orjson
+import zlib
 from datetime import datetime
+from typing import Dict, Set, List
+from fastapi import WebSocket
+from app.db import get_db, save_device_data_batch
+from app.models import IoTDevice
+from app.websocket_manager import websocket_connections  # Import from websocket_manager
+from app.shared_state import save_flag  # Import save_flag
 
-# Global message queue for all incoming messages (no longer used)
-# global_message_queue = asyncio.Queue(maxsize=100000)  # Increased queue size
-device_queues = {} 
-device_broadcasters = {}
-# Accumulator to track total messages sent to the frontend
+# Global variables for device queues
+device_queues: Dict[str, asyncio.Queue] = {}
+device_config: Dict[str, dict] = {}
+device_save_queues: Dict[str, asyncio.Queue] = {}
+device_broadcasters: Dict[str, asyncio.Task] = {}  # Track broadcaster tasks
+device_savers: Dict[str, asyncio.Task] = {}  # Track saver tasks
+global_message_queue: asyncio.Queue = asyncio.Queue()  # Global message queue
+
+# Global counter for total messages sent to frontend
 total_messages_sent_to_frontend = 0
-# Batch queue for message processing
-device_save_queues = {}       # device_id -> asyncio.Queue for saving
-device_savers = {}            # device_id -> Task (saving)
-device_config = {}            # device_id -> {"save_flag": bool, ... other config ...}
 
-# Batch size and interval settings - optimized for high throughput
-BATCH_SIZE = 500  # Reduced batch size for faster processing
-BATCH_INTERVAL = 1.0  # Reduced interval for faster processing
+# WebSocket broadcasting configuration
+WEBSOCKET_BATCH_SIZE = 500  # Smaller batch size for frontend broadcast
+WEBSOCKET_BATCH_TIMEOUT = 0.02  # 20ms timeout for frontend batches
+COMPRESSION_THRESHOLD = 1000  # Compress if batch size > 1000
+COMPRESSION_LEVEL = 6  # zlib compression level (1-9, 6 is balanced)
+
+# Monitoring counters for broadcasting and database operations
+class ProcessingCounters:
+    def __init__(self):
+        self.device_processed = 0
+        self.broadcast_sent = 0
+        self.broadcast_errors = 0
+        self.db_saved = 0
+        self.db_errors = 0
+        self.start_time = time.time()
+    
+    def get_stats(self):
+        elapsed = time.time() - self.start_time
+        return {
+            "device_processed": self.device_processed,
+            "broadcast_sent": self.broadcast_sent,
+            "broadcast_errors": self.broadcast_errors,
+            "db_saved": self.db_saved,
+            "db_errors": self.db_errors,
+            "elapsed_time": elapsed,
+            "processing_rate": self.device_processed / elapsed if elapsed > 0 else 0,
+            "broadcast_rate": self.broadcast_sent / elapsed if elapsed > 0 else 0,
+            "db_rate": self.db_saved / elapsed if elapsed > 0 else 0
+        }
+
+# Global processing counters
+processing_counters = ProcessingCounters()
+
+# Function to get processing stats
+def get_processing_stats():
+    """Get current processing statistics."""
+    return processing_counters.get_stats()
+
+def print_processing_stats():
+    """Print current processing statistics."""
+    stats = processing_counters.get_stats()
+    print(f"\n📊 PROCESSING STATS:")
+    print(f"   Device Processed: {stats['device_processed']} ({stats['processing_rate']:.1f}/sec)")
+    print(f"   Broadcast Sent: {stats['broadcast_sent']} ({stats['broadcast_rate']:.1f}/sec)")
+    print(f"   Broadcast Errors: {stats['broadcast_errors']}")
+    print(f"   DB Saved: {stats['db_saved']} ({stats['db_rate']:.1f}/sec)")
+    print(f"   DB Errors: {stats['db_errors']}")
+    print(f"   Elapsed Time: {stats['elapsed_time']:.1f} seconds")
 
 async def process_message_batches(msg):
     """Handles incoming MQTT messages, processes them directly."""
@@ -44,7 +93,7 @@ async def process_message_batches(msg):
             print(f"Warning: Device queue full for {device_id}")
         
         # Save message if save flag is enabled
-        if app.shared_state.save_flag:
+        if save_flag:
             await start_device_saver(device_id)
             try:
                 device_save_queues[device_id].put_nowait(message_content)
@@ -114,7 +163,7 @@ async def global_message_processor():
                         break
                 
                 # Save messages if save flag is enabled
-                if app.shared_state.save_flag:
+                if save_flag:
                     await start_device_saver(device_id)
                     for message_content in device_messages:
                         try:
@@ -155,19 +204,31 @@ async def batch_processor(device_id: str, batch_size: int = 500, interval: float
             message = await asyncio.wait_for(queue.get(), timeout=interval)
             pending_messages.append(message)
 
-            # If we hit the batch size, process the batch
-            if len(pending_messages) >= batch_size:
-                await process_batch(device_id, pending_messages)
-                pending_messages.clear()
-                last_flush = asyncio.get_event_loop().time()
+            # Process batch if we have enough messages or enough time has passed
+            current_time = asyncio.get_event_loop().time()
+            if len(pending_messages) >= batch_size or (current_time - last_flush) >= interval:
+                if pending_messages:
+                    # MONITORING: Count database saves
+                    processing_counters.db_saved += len(pending_messages)
+                    
+                    await save_device_data_batch_to_db(device_id, pending_messages)
+                    pending_messages = []
+                    last_flush = current_time
 
         except asyncio.TimeoutError:
-            # Interval passed without enough messages to fill a batch
-            # Process what we have if there's anything pending
+            # Timeout occurred, flush any pending messages
             if pending_messages:
-                await process_batch(device_id, pending_messages)
-                pending_messages.clear()
+                # MONITORING: Count database saves
+                processing_counters.db_saved += len(pending_messages)
+                
+                await save_device_data_batch_to_db(device_id, pending_messages)
+                pending_messages = []
                 last_flush = asyncio.get_event_loop().time()
+        except Exception as e:
+            # MONITORING: Count database errors
+            processing_counters.db_errors += len(pending_messages)
+            print(f"Error in batch processor for device {device_id}: {e}")
+            await asyncio.sleep(0.1)  # Brief pause on error
 
 
 async def process_batch(device_id: str, batch: list):
@@ -247,11 +308,26 @@ async def process_batch(device_id: str, batch: list):
 #             await send_to_connected_clients(batch)
 
 async def broadcast_messages(device_id: str):
-    """Batch messages and broadcast them to WebSocket clients."""
+    """Batch messages and broadcast them to WebSocket clients based on device_id."""
     global total_messages_sent_to_frontend
-    BATCH_SIZE = 2000  # Increased batch size for better throughput
-    BATCH_TIMEOUT = 0.05  # Reduced timeout for faster processing
+    BATCH_SIZE = 2000  # Backend processing batch size
+    BATCH_TIMEOUT = 0.05  # Backend processing timeout
     queue = device_queues[device_id]
+
+    # Device to frontend mapping
+    device_to_frontend = {
+        "frontend1_device": "1",
+        "frontend1_high_perf_device": "1", 
+        "frontend1_ultra_high_perf_device": "1",  # New optimized publisher
+        "frontend2_device": "2",
+        "frontend2_high_perf_device": "2",
+        "frontend2_ultra_high_perf_device": "2"   # New optimized publisher
+    }
+    
+    # Get the target frontend for this device
+    target_frontend = device_to_frontend.get(device_id, "1")  # Default to frontend-1 if unknown
+    
+    print(f"🔀 Device {device_id} mapped to frontend-{target_frontend}")
 
     while True:
         batch = []
@@ -266,40 +342,65 @@ async def broadcast_messages(device_id: str):
 
         # Send the batch if it's non-empty
         if batch:
-            print(f"Sending batch with size: {len(batch)}")
-            total_messages_sent_to_frontend += len(batch)  # Update the accumulator
-            print(f"Total messages sent to frontend: {total_messages_sent_to_frontend}")
+            # MONITORING: Count device processed messages
+            processing_counters.device_processed += len(batch)
             
-            # Skip database lookup and websocket processing for now to improve throughput
-            # Only process if websockets are actually connected
-            websockets = websocket_connections.get("1", set())
-            print(f"Checking websockets for client_id '1': {websockets}")
-            print(f"All websocket_connections: {websocket_connections}")
+            print(f"📤 Sending batch of {len(batch)} messages from {device_id} to frontend-{target_frontend}")
+            total_messages_sent_to_frontend += len(batch)  # Update the accumulator
+            print(f"📊 Total messages sent to frontend: {total_messages_sent_to_frontend}")
+            
+            # Send only to the target frontend
+            websockets = websocket_connections.get(target_frontend, set())
+            print(f"🔍 Checking websockets for frontend-{target_frontend}: {len(websockets)} connections")
             if websockets:
                 try:
-                    # Quick database lookup without async context manager
-                    user_id = "1"  # Hardcode for now to avoid DB lookup
-                    await send_to_connected_clients(user_id, batch)
+                    await send_to_connected_clients_optimized(target_frontend, batch)
+                    # MONITORING: Count successful broadcasts
+                    processing_counters.broadcast_sent += len(batch)
+                    print(f"✅ Successfully sent {len(batch)} messages to frontend-{target_frontend}")
                 except Exception as e:
-                    print(f"Error in broadcast: {e}")
+                    # MONITORING: Count broadcast errors
+                    processing_counters.broadcast_errors += len(batch)
+                    print(f"❌ Error sending to frontend-{target_frontend}: {e}")
+            else:
+                print(f"⚠️  No WebSocket connections found for frontend-{target_frontend}")
         else:
             # No messages collected in this cycle, sleep briefly to reduce CPU usage
             await asyncio.sleep(0.005)  # Reduced sleep time
 
 
-async def send_to_connected_clients(client_id: str, messages: list):
-    """Send a batch of messages to all connected WebSocket clients."""
+async def send_to_connected_clients_optimized(client_id: str, messages: list):
+    """Send a batch of messages to all connected WebSocket clients with optimizations."""
     websockets = websocket_connections.get(client_id, set())
-    print(websockets)
-    if websockets:
-        try:
-            message_data = json.dumps(messages)
-            tasks = [ws.send_text(message_data) for ws in websockets]
-            await asyncio.gather(*tasks)
-        except Exception as e:
-            print(f"Error broadcasting messages to user {client_id}: {e}")
-    else:
+    if not websockets:
         print(f"No active websocket connections found for user {client_id}")
+        return
+
+    try:
+        # OPTIMIZED: Use orjson for faster serialization and binary output
+        message_data = orjson.dumps(messages)
+        
+        # OPTIMIZED: Compress large payloads to reduce network overhead
+        if len(message_data) > COMPRESSION_THRESHOLD:
+            compressed_data = zlib.compress(message_data, level=COMPRESSION_LEVEL)
+            print(f"📦 Compressed payload: {len(message_data)} -> {len(compressed_data)} bytes ({len(compressed_data)/len(message_data)*100:.1f}% compression)")
+            
+            # Send compressed data as binary
+            tasks = [ws.send_bytes(compressed_data) for ws in websockets]
+        else:
+            # Send uncompressed data as binary (faster than text)
+            tasks = [ws.send_bytes(message_data) for ws in websockets]
+        
+        # OPTIMIZED: Use gather for concurrent sending
+        await asyncio.gather(*tasks, return_exceptions=True)
+        
+    except Exception as e:
+        print(f"Error broadcasting messages to user {client_id}: {e}")
+
+
+async def send_to_connected_clients(client_id: str, messages: list):
+    """Legacy method - kept for backward compatibility."""
+    await send_to_connected_clients_optimized(client_id, messages)
 
 
 def monitor_message_rate():

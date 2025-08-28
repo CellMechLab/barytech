@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.message_processor import broadcast_messages, batch_processor, global_message_processor
 from app.mqtt_client import process_raw_messages
-from app.mqtt_client import start_mqtt_client,get_mqtt_client
+from app.mqtt_client import start_mqtt_client, get_mqtt_client
 from fastapi import WebSocket, WebSocketDisconnect
 from app.db import get_db, save_client_session, mark_client_disconnected
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +16,7 @@ from app.routers import router  # Import your router
 from strawberry.asgi import GraphQL
 import strawberry
 from strawberry.fastapi import GraphQLRouter
+from app.metrics import router as metrics_router  # Import Prometheus metrics router
 
 @strawberry.type
 class Query:
@@ -36,7 +37,8 @@ origins = [
     # "http://localhost",
     # "http://localhost:8080",  # Adjust based on your frontend's address
     "http://localhost:3000",
-    "http://127.0.0.1:3000"
+    "http://127.0.0.1:3001",
+    "http://localhost:3001",
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -50,6 +52,65 @@ graphql_app = GraphQLRouter(schema, subscription_protocols=["graphql-ws"])
 app.include_router(auth_router)
 app.include_router(router, prefix="/api", tags=["IoT Devices"])  # Optional: Add prefix or tags for grouping
 app.include_router(graphql_app, prefix="/graphql")
+app.include_router(metrics_router)  # Mount Prometheus metrics endpoint
+
+@app.get("/monitoring/stats")
+async def get_monitoring_stats():
+    """Get comprehensive monitoring statistics."""
+    from app.mqtt_client import get_message_stats
+    from app.message_processor import get_processing_stats
+    
+    mqtt_stats = get_message_stats()
+    processing_stats = get_processing_stats()
+    
+    # Combine stats
+    combined_stats = {
+        **mqtt_stats,
+        **processing_stats,
+        "total_messages_sent_to_frontend": 0  # This will be updated from message_processor
+    }
+    
+    # Get total messages sent to frontend from message_processor
+    from app.message_processor import total_messages_sent_to_frontend
+    combined_stats["total_messages_sent_to_frontend"] = total_messages_sent_to_frontend
+    
+    return combined_stats
+
+@app.get("/monitoring/health")
+async def get_health_status():
+    """Get system health status."""
+    from app.mqtt_client import get_message_stats
+    from app.message_processor import get_processing_stats
+    
+    mqtt_stats = get_message_stats()
+    processing_stats = get_processing_stats()
+    
+    # Calculate health metrics
+    total_received = mqtt_stats.get("mqtt_received", 0)
+    total_parsed = mqtt_stats.get("mqtt_parsed", 0)
+    total_processed = processing_stats.get("device_processed", 0)
+    total_broadcast = processing_stats.get("broadcast_sent", 0)
+    
+    # Calculate success rates
+    parsing_success_rate = (total_parsed / total_received * 100) if total_received > 0 else 100
+    processing_success_rate = (total_processed / total_parsed * 100) if total_parsed > 0 else 100
+    broadcast_success_rate = (total_broadcast / total_processed * 100) if total_processed > 0 else 100
+    
+    health_status = {
+        "status": "healthy",
+        "parsing_success_rate": round(parsing_success_rate, 2),
+        "processing_success_rate": round(processing_success_rate, 2),
+        "broadcast_success_rate": round(broadcast_success_rate, 2),
+        "total_messages_received": total_received,
+        "total_messages_processed": total_processed,
+        "total_messages_broadcast": total_broadcast
+    }
+    
+    # Mark as unhealthy if any success rate is below 95%
+    if parsing_success_rate < 95 or processing_success_rate < 95 or broadcast_success_rate < 95:
+        health_status["status"] = "degraded"
+    
+    return health_status
 
 @app.on_event("startup")
 async def startup_event():
@@ -58,6 +119,13 @@ async def startup_event():
     
     # Start the raw message processor for high-throughput message handling
     asyncio.create_task(process_raw_messages())
+    
+    # Start the global message processor for device-specific processing
+    asyncio.create_task(global_message_processor())
+    
+    # Start monitoring stats printing
+    from app.mqtt_client import start_monitoring
+    asyncio.create_task(start_monitoring())
 
     mqtt_thread = threading.Thread(target=start_mqtt_client)
     mqtt_thread.start()

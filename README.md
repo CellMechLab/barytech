@@ -44,7 +44,7 @@ To set up and run the backend:
 2. Run the backend using **Uvicorn**:
 
     ```bash
-    python backend.py
+    python run.py
     ```
 
 3. The backend will be available at **[http://127.0.0.1:8000](http://127.0.0.1:8000)**.

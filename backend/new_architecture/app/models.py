@@ -24,7 +24,7 @@ class ClientSession(Base):
     __tablename__ = "client_sessions"
     
     id = Column(Integer, primary_key=True, index=True)
-    client_id = Column(Integer, unique=True, index=True)  # Client ID to track individual sessions
+    client_id = Column(String, unique=True, index=True)  # Client ID to track individual sessions
     websocket_id = Column(String)  # WebSocket ID (optional) to track connection details
     connected = Column(Boolean, default=True)  # Whether the client is currently connected
     last_connected_at = Column(DateTime, default=datetime.utcnow)  # Timestamp for last connection

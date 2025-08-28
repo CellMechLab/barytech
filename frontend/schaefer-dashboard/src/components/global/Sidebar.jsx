@@ -16,6 +16,7 @@ import PieChartOutlineOutlinedIcon from "@mui/icons-material/PieChartOutlineOutl
 import TimelineOutlinedIcon from "@mui/icons-material/TimelineOutlined";
 import MenuOutlinedIcon from "@mui/icons-material/MenuOutlined";
 import MapOutlinedIcon from "@mui/icons-material/MapOutlined";
+import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 
 const Item = ({ title, to, icon, selected, setSelected }) => {
   const theme = useTheme();
@@ -159,6 +160,12 @@ const Sidebar = () => {
             <Item
               to="/add-device"
               icon={<PersonOutlinedIcon />}
+              selected={selected}
+              setSelected={setSelected}
+            />
+            <Item
+              to="/admin"
+              icon={<AdminPanelSettingsIcon />}
               selected={selected}
               setSelected={setSelected}
             />

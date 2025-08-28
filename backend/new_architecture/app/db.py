@@ -110,15 +110,16 @@ async def get_device_data_by_device_id(db: AsyncSession, device_id: str):
     return result.scalars().all()
 
 # Save or update a client session
-async def save_client_session(db: AsyncSession, client_id: int, websocket_id: str):
+async def save_client_session(db: AsyncSession, client_id: str, websocket_id: str):
     """Save or update a client session."""
     result = await db.execute(
-        select(ClientSession).where(ClientSession.client_id == str(client_id))
+        select(ClientSession).where(ClientSession.client_id == client_id)
     )
     session = result.scalars().first()
     if session:
         session.websocket_id = websocket_id
         session.connected = True
+        session.last_connected_at = datetime.utcnow()
     else:
         session = ClientSession(client_id=client_id, websocket_id=websocket_id)
     db.add(session)
@@ -128,7 +129,7 @@ async def save_client_session(db: AsyncSession, client_id: int, websocket_id: st
 async def mark_client_disconnected(db: AsyncSession, client_id: str):
     """Mark a client as disconnected."""
     result = await db.execute(
-        select(ClientSession).where(ClientSession.client_id == str(client_id))
+        select(ClientSession).where(ClientSession.client_id == client_id)
     )
     session = result.scalars().first()
     if session:

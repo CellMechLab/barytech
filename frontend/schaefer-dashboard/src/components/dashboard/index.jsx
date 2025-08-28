@@ -226,13 +226,13 @@ const Dashboard = () => {
                 fontSize={titleFontSize}
                 color={colors.grey[100]}
               >
-                Data Points
+                Force vs Time
               </Typography>
               <Typography
                 fontSize={subtitleFontSize}
                 color={colors.greenAccent[500]}
               >
-                number
+                {/* number */}
               </Typography>
             </Box>
             <Box>
@@ -249,6 +249,47 @@ const Dashboard = () => {
     },
     {
       id: 8,
+      gridColumn: "span 12",
+      gridRow: "span 3",
+      content: (
+        <Box width="100%">
+          <Box
+            mt="25px"
+            p="0 30px"
+            display="flex "
+            justifyContent="space-between"
+            alignItems="center"
+          >
+            <Box>
+              <Typography
+                fontWeight="bold"
+                sx={{ color: colors.grey[100] }}
+                fontSize={titleFontSize}
+                color={colors.grey[100]}
+              >
+                Z vs Time
+              </Typography>
+              <Typography
+                fontSize={subtitleFontSize}
+                color={colors.greenAccent[500]}
+              >
+                {/* number */}
+              </Typography>
+            </Box>
+            <Box>
+              <IconButton onClick={handleDownload}>
+                <DownloadOutlinedIcon
+                  sx={{ fontSize: "26px", color: colors.greenAccent[500] }}
+                />
+              </IconButton>
+            </Box>
+          </Box>
+          <LineChart dataset="displacement" ref={setChartRef} min={0} max={10} />
+        </Box>
+      ),
+    },
+    {
+      id: 9,
       gridColumn: "span 4",
       gridRow: "span 2",
       content: (
@@ -281,7 +322,7 @@ const Dashboard = () => {
       ),
     },
     {
-      id: 9,
+      id: 10,
       gridColumn: "span 4",
       gridRow: "span 2",
       content: (
@@ -298,7 +339,7 @@ const Dashboard = () => {
       ),
     },
     {
-      id: 10,
+      id: 11,
       gridColumn: "span 4",
       gridRow: "span 2",
       content: (
@@ -379,12 +420,12 @@ const Dashboard = () => {
         screenWidth <= 800
         ? [1, 2, 3, 4, 5, 6].includes(box.id)
           ? "span 6"
-          : [8, 9, 10].includes(box.id)
+          : [9, 10, 11].includes(box.id)
           ? "span 12"
           : box.gridColumn
         : [1, 2, 3, 4, 5, 6].includes(box.id)
         ? "span 2"
-        : [8, 9, 10].includes(box.id)
+        : [9, 10, 11].includes(box.id)
         ? "span 4"
         : box.gridColumn,
       }))
@@ -403,6 +444,28 @@ const Dashboard = () => {
       window.removeEventListener("resize", updateGridColumns);
     };
   }, []);
+   const downloadDeviceData = async () => {
+        try {
+          const response = await fetch("http://localhost:8000/api/export/device_data");
+          if (!response.ok) {
+            throw new Error("Failed to download the file.");
+          }
+      
+          const blob = await response.blob();
+          const url = window.URL.createObjectURL(blob);
+      
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = "device_data.hdf5";
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        } catch (error) {
+          console.error("Error downloading device data:", error);
+          alert("Failed to download device data.");
+        }
+      };
+      
 
   return (
     <Box m="20px">
@@ -412,7 +475,7 @@ const Dashboard = () => {
 
         <Box>
           <Button
-            onClick={() => chartRef.current.downloadDataBufferAsCSV()}
+            onClick={downloadDeviceData}
             sx={{
               backgroundColor: colors.blueAccent[700],
               color: colors.grey[100],

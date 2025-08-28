@@ -46,10 +46,15 @@ const LineChartWithArea = ({ lineColor, areaColor, data }) => {
         .domain(d3.extent(data, (d) => d.date))
         .range([margin.left, width - margin.right]);
 
+      // Y-scale (values, including negative)
+      const yExtent = d3.extent(data, (d) => d.value);
+      const yPadding = (yExtent[1] - yExtent[0]) * 0.1 || 1e-7; // 10% padding or fallback
+      const yDomain = [yExtent[0] - yPadding, yExtent[1] + yPadding];
       const yScale = d3
         .scaleLinear()
-        .domain([0, d3.max(data, (d) => d.value)])
-        .range([height - margin.bottom, margin.top]);
+        .domain(yDomain)
+        .range([height - margin.bottom, margin.top])
+        .nice();
 
       const area = d3
         .area()

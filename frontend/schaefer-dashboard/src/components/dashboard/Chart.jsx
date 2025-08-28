@@ -53,36 +53,6 @@ import React, {
   
       const [dataPointCount, setDataPointCount] = useState(0);
   
-      const downloadDataBufferAsCSV = () => {
-        if (!chartData || chartData.datasets.every((dataset) => dataset.data.length === 0)) {
-          alert("No data available to download.");
-          return;
-        }
-  
-        const csvContent = [["Index", "Data1_y", "Data2_y"]];
-        const maxDataPoints = Math.max(
-          chartData.datasets[0].data.length,
-          chartData.datasets[1].data.length
-        );
-  
-        for (let i = 0; i < maxDataPoints; i++) {
-          const data1_y = chartData.datasets[0].data[i] || "";
-          const data2_y = chartData.datasets[1].data[i] || "";
-          csvContent.push([i, data1_y, data2_y]);
-        }
-  
-        const csvString = csvContent.map((row) => row.join(",")).join("\n");
-        const blob = new Blob([csvString], { type: "text/csv" });
-        const url = URL.createObjectURL(blob);
-  
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = "chartData_y_values.csv";
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      };
-  
       useEffect(() => {
         if (dataBuffer && dataBuffer.length >= 30) {
           const newCount = dataPointCount + dataBuffer.length;
@@ -126,51 +96,59 @@ import React, {
   
       useImperativeHandle(ref, () => ({
         downloadChart,
-        downloadDataBufferAsCSV,
       }));
-  
       const chartOptions = {
         type: 'line',
         data: {
-            labels: Array.from({ length: 10 }, (_, i) => i + 1),
-            datasets: [{
-                label: 'Random Data',
-                data: chartData,
-                borderColor: 'steelblue',
-                backgroundColor: 'rgba(70,130,180,0.2)',
-                borderWidth: 2,
-                fill: true,
-                tension: 0.1
-            }]
+          datasets: [{
+            label: 'Displacement / Force',
+            data: chartData,
+            borderColor: 'steelblue',
+            backgroundColor: 'rgba(70,130,180,0.2)',
+            borderWidth: 2,
+            fill: true,
+            tension: 0.1,
+            parsing: false  // important to use raw x/y
+          }]
         },
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: {
-            display: !isDashboard,
-            position: "top",
-          },
-          tooltip: {
-            enabled: true,
-          },
-        },
-        scales: {
-          x: {
-            title: {
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: {
               display: !isDashboard,
-              text: "Data Points",
+              position: "top",
+            },
+            tooltip: {
+              enabled: true,
+              callbacks: {
+                label: (ctx) => `Value: ${ctx.parsed.y.toExponential(3)}`
+              }
+            }
+          },
+          scales: {
+            x: {
+              title: {
+                display: !isDashboard,
+                text: "Data Points",
+              },
+              type: 'linear'
+            },
+            y: {
+              title: {
+                display: !isDashboard,
+                text: "Value",
+              },
+              min: -2e-12,
+              max: 2e-12,
+              ticks: {
+                callback: (value) => value.toExponential(1)
+              }
             },
           },
-          y: {
-            title: {
-              display: !isDashboard,
-              text: "Value",
-            },
-            beginAtZero: true,
-            suggestedMax: 100
-          },
-        },
+        }
       };
+      
   
       return (
         <div ref={chartRef} style={{ width: "100%", height: "100%" }}>

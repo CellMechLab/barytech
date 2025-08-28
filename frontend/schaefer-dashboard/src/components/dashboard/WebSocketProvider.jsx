@@ -1,6 +1,7 @@
 import React, { createContext, useEffect, useState } from "react";
 import { Toaster, toast } from "sonner"; // Import Sonner's Toaster and toast
 import { useUser } from "../../context/UserContext"; // Import your UserContext
+import pako from "pako"; // Import pako for decompression
 
 
 // Create a WebSocket context
@@ -36,15 +37,67 @@ export const WebSocketProvider = ({ children }) => {
       newSocket.send(JSON.stringify({ client_id })); // Send the client ID
     };
 
-    newSocket.onmessage = (event) => {
-      const messageBatch = event.data;
+    newSocket.onmessage = async (event) => {
       try {
-        const parsedBatch = JSON.parse(messageBatch); // The backend sends a JSON array of objects
+        let parsedBatch;
+        
+        // Handle binary data (Blob)
+        if (event.data instanceof Blob) {
+          console.log("Received binary data (Blob), size:", event.data.size);
+          
+          // Convert Blob to ArrayBuffer
+          const arrayBuffer = await event.data.arrayBuffer();
+          const uint8Array = new Uint8Array(arrayBuffer);
+          
+          // Try to parse as uncompressed binary JSON first
+          try {
+            const textDecoder = new TextDecoder('utf-8');
+            const jsonString = textDecoder.decode(uint8Array);
+            parsedBatch = JSON.parse(jsonString);
+            console.log("Successfully parsed uncompressed binary data");
+          } catch (uncompressedError) {
+            // If that fails, try to decompress with pako
+            try {
+              console.log("Attempting to decompress binary data with pako...");
+              const decompressed = pako.inflate(uint8Array, { to: 'string' });
+              parsedBatch = JSON.parse(decompressed);
+              console.log("Successfully decompressed and parsed binary data");
+            } catch (decompressError) {
+              console.error("Error decompressing binary data:", decompressError);
+              throw new Error(`Failed to parse both uncompressed and compressed data: ${uncompressedError.message} | ${decompressError.message}`);
+            }
+          }
+        } 
+        // Handle text data (fallback for non-binary messages)
+        else if (typeof event.data === 'string') {
+          console.log("Received text data, length:", event.data.length);
+          parsedBatch = JSON.parse(event.data);
+        }
+        // Handle ArrayBuffer directly
+        else if (event.data instanceof ArrayBuffer) {
+          console.log("Received ArrayBuffer, size:", event.data.byteLength);
+          const uint8Array = new Uint8Array(event.data);
+          const textDecoder = new TextDecoder('utf-8');
+          const jsonString = textDecoder.decode(uint8Array);
+          parsedBatch = JSON.parse(jsonString);
+        }
+        else {
+          throw new Error(`Unsupported data type: ${typeof event.data}`);
+        }
+
+        // Update state with parsed data
         setBatchCount(parsedBatch.length);
         setTotalPoints((prevTotal) => prevTotal + parsedBatch.length);
         setDataBuffer((prev) => [...prev, ...parsedBatch]);
+        
+        console.log(`Parsed batch of ${parsedBatch.length} messages`);
+        
       } catch (error) {
         console.error("Error parsing message batch:", error);
+        console.error("Raw event data:", event.data);
+        console.error("Data type:", typeof event.data);
+        console.error("Data constructor:", event.data.constructor.name);
+        
         toast.error("Error parsing WebSocket message!", {
           style: { backgroundColor: "red", color: "white" },
         });
