@@ -40,3 +40,4 @@ typing-extensions>=4.10.0
 # MQTT (optional - can be removed for simplified deployment)
 paho-mqtt==1.6.0
 # gmqtt==0.6.14
+strawberry-graphql==0.211.0
