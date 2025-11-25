@@ -18,6 +18,7 @@ const DeviceDataTable = () => {
   const [loading, setLoading] = useState(true);
   const [selectionModel, setSelectionModel] = useState([]);
   const [collapsedGroups, setCollapsedGroups] = useState({});
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     const fetchDeviceData = async () => {
@@ -80,41 +81,57 @@ const DeviceDataTable = () => {
       });
       return;
     }
-  
+
+    setDeleting(true);
+    const loadingToast = toast.loading("Deleting device data...", {
+      style: { backgroundColor: "orange", color: "white" },
+    });
+
     try {
       const token = sessionStorage.getItem("authToken");
       if (!token) {
-        toast.error("You are not logged in. Please log in to delete data.", {
+        toast.dismiss(loadingToast);
+        toast.error("You are not logged in. Please log in.", {
           style: { backgroundColor: "red", color: "white" },
         });
         navigate("/auth");
         return;
       }
-  
-      // Send a single delete request with an array of IDs in the body
-      await axios.delete("http://127.0.0.1:8000/api/device-data/", {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        data: { ids: selectionModel }, // Pass selected IDs in the request body
-      });
-  
-      // Remove deleted devices from the state
+
+      // Extract unique device IDs ONLY from group rows
+      const selectedDeviceIds = [...new Set(
+        selectionModel
+          .filter((id) => id.startsWith("group-"))
+          .map((id) => id.replace("group-", ""))
+      )];
+
+      // DELETE for each device using new endpoint
+      for (const deviceId of selectedDeviceIds) {
+        await axios.delete(
+          `http://127.0.0.1:8000/api/device-data/by-device/${deviceId}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+      }
+
+      // Remove from table UI
       setDeviceData((prev) =>
-        prev.filter((device) => !selectionModel.includes(device.id))
+        prev.filter((item) => !selectedDeviceIds.includes(item.device_id))
       );
-  
-      toast.success("Selected rows deleted successfully!", {
+
+      toast.dismiss(loadingToast);
+      toast.success("Device data deleted successfully!", {
         style: { backgroundColor: "green", color: "white" },
       });
-  
-      setSelectionModel([]); // Clear selection
+
+      setSelectionModel([]);
     } catch (error) {
-      console.error("Error deleting devices:", error);
-      toast.error("Failed to delete selected rows. Please try again.", {
+      console.error(error);
+      toast.dismiss(loadingToast);
+      toast.error("Failed to delete device data. Please try again.", {
         style: { backgroundColor: "red", color: "white" },
       });
+    } finally {
+      setDeleting(false);
     }
   };
   

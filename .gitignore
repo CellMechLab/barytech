@@ -21,6 +21,10 @@ wheels/
 *.egg
 MANIFEST
 
+# Python cache
+__pycache__/
+*.pyc
+
 # Virtual environments
 venv/
 .venv/
@@ -32,6 +36,7 @@ ENV/
 .idea/
 *.swp
 *.swo
+.cursor/
 
 # OS
 .DS_Store
@@ -48,6 +53,10 @@ data/
 
 # Logs
 *.log
+backend/logs.txt
+
+# Windows reserved filenames
+backend/new_architecture/nul
 
 # Environment variables
 .env
@@ -59,3 +68,12 @@ node_modules/
 # Build files
 build/
 dist/
+
+# Local deployment/test files
+RENDER_DEPLOYMENT_FIX.md
+RENDER_DEPLOYMENT_GUIDE.md
+backend/Backend App Folder File Description.txt
+
+# Mosquitto configs
+mosquitto_high_throughput.conf
+backend/new_architecture/mosquitto-render.yaml
