@@ -8,6 +8,7 @@ from app.auth import get_current_user_id  # Dependency to get user_id from token
 from typing import List
 from sqlalchemy.future import select
 from sqlalchemy.orm import joinedload
+from sqlalchemy import delete
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -138,6 +139,36 @@ async def delete_device_data(
         await db.commit()
 
         return {"detail": f"{len(device_data_entries)} device data entries deleted successfully."}
+
+
+@router.delete("/device-data/by-device/{device_id}")
+async def delete_device_data_by_device(
+    device_id: str,
+    user_id: int = Depends(get_current_user_id),
+):
+    """
+    Delete all device data entries for a specific device.
+    Verifies the device belongs to the authenticated user before deletion.
+    """
+    async with get_db() as db:
+        # Ensure this device belongs to the user
+        result = await db.execute(
+            select(IoTDevice).filter(
+                IoTDevice.id == device_id,
+                IoTDevice.user_id == user_id,
+            )
+        )
+        device = result.scalars().first()
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found or not authorized.")
+
+        # Bulk delete all rows for this device
+        await db.execute(
+            delete(DeviceData).where(DeviceData.device_id == device_id)
+        )
+        await db.commit()
+
+        return {"detail": f"All device data for device {device_id} deleted successfully."}
 
 
 from fastapi.responses import FileResponse

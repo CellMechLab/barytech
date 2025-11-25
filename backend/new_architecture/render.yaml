@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: barytech-backend
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python start_render.py
+    healthCheckPath: /monitoring/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: barytech-database
+          property: connectionString
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: SAVE_FLAG
+        value: true
+      - key: ENABLE_BROADCAST
+        value: true
+      - key: PIPELINE_MODE
+        value: kafka_first
+      - key: KAFKA_FIRST_MODE
+        value: true
+      - key: VERBOSE_LOGGING
+        value: false
+      - key: LOG_BATCH_SIZE
+        value: 1000
+      - key: LOG_COMPRESSION_THRESHOLD
+        value: 10000
+
+databases:
+  - name: barytech-database
+    plan: starter
+    databaseName: schaefer
+    user: postgres

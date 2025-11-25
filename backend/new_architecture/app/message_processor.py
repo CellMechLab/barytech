@@ -9,7 +9,7 @@ from fastapi import WebSocket
 from app.db import get_db, save_device_data_batch
 from app.models import IoTDevice
 from app.websocket_manager import websocket_connections  # Import from websocket_manager
-from app.shared_state import save_flag  # Import save_flag
+import app.shared_state  # Import shared_state for per-device save mode
 
 # Global variables for device queues
 device_queues: Dict[str, asyncio.Queue] = {}
@@ -81,7 +81,7 @@ async def process_message_batches(msg):
         device_id = message_content.get("device_id")
         
         if device_id not in device_config:
-            device_config[device_id] = {"save_flag": False}
+            device_config[device_id] = {}
         
         # Ensure broadcaster is started for this device
         await start_device_broadcaster(device_id)
@@ -92,8 +92,8 @@ async def process_message_batches(msg):
         except asyncio.QueueFull:
             print(f"Warning: Device queue full for {device_id}")
         
-        # Save message if save flag is enabled
-        if save_flag:
+        # Save message if per-device save flag is enabled
+        if app.shared_state.is_save_enabled(device_id):
             await start_device_saver(device_id)
             try:
                 device_save_queues[device_id].put_nowait(message_content)
@@ -142,7 +142,7 @@ async def global_message_processor():
                 device_id = message_content.get("device_id")
                 
                 if device_id not in device_config:
-                    device_config[device_id] = {"save_flag": False}
+                    device_config[device_id] = {}
                 
                 # Group messages by device for efficient processing
                 if device_id not in device_batches:
@@ -162,8 +162,8 @@ async def global_message_processor():
                         print(f"Warning: Device queue full for {device_id}")
                         break
                 
-                # Save messages if save flag is enabled
-                if save_flag:
+                # Save messages if per-device save flag is enabled
+                if app.shared_state.is_save_enabled(device_id):
                     await start_device_saver(device_id)
                     for message_content in device_messages:
                         try:

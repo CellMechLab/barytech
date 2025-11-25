@@ -1,35 +1,93 @@
-# from fastapi import WebSocket, WebSocketDisconnect
-# from app.db import get_db, save_device_data, mark_message_as_sent, save_client_session, mark_client_disconnected
-# from fastapi.middleware.cors import CORSMiddleware
-# import json
+# websocket_manager.py
+# WebSocket connection management and message handling
+import json
+from fastapi import WebSocket, WebSocketDisconnect
+from app.shared_state import set_save_mode
 
+
+# Dictionary to store WebSocket connections by client_id
 websocket_connections = {}
 
-# async def websocket_endpoint(websocket: WebSocket):
-#     print("websocket_endpoint")
-#     db = next(get_db())
-#     await websocket.accept()
-#     client_id = ""
-#     print(f"Connected client: {websocket}")
-#     # Save client session
-#     save_client_session(db, client_id, str(websocket))
 
-#     # Add WebSocket connection to the dictionary
-#     websocket_connections[client_id] = websocket
+async def handle_websocket_message(data: dict, websocket: WebSocket):
+    """
+    Handle incoming WebSocket messages and route them to appropriate handlers.
+    
+    Args:
+        data: Parsed JSON message from WebSocket
+        websocket: The WebSocket connection object
+    """
+    msg_type = data.get("type")
+    
+    # ------------------------------
+    # 🔥 Handle SAVE MODE toggling
+    # ------------------------------
+    if msg_type == "save":
+        device_id = data.get("device_id")  # Can be None for global mode
+        save = bool(data.get("save", False))
+        
+        # Set save mode (per-device if device_id provided, global if None)
+        set_save_mode(device_id, save)
+        
+        if device_id:
+            print(f"🔥 SAVE MODE SET: device={device_id}, save={save}")
+        else:
+            print(f"🔥 GLOBAL SAVE MODE SET: save={save}")
+    
+    # ------------------------------
+    # Other message types (connect, request_historical, etc.)
+    # ------------------------------
+    elif msg_type == "connect":
+        print("Client connected", data)
+    
+    elif msg_type == "request_historical":
+        print("Client requested history")
+        # TODO: Implement historical data retrieval
+    
+    elif msg_type == "slider":
+        print("Slider update received", data)
+        # TODO: Handle slider updates (forward to MQTT, etc.)
+    
+    else:
+        print(f"Unknown message type: {msg_type}")
 
-#     # Send buffered messages if they exist
-#     unsent_messages = get_unsent_messages(db, client_id)
-#     if unsent_messages:
-#         for msg in unsent_messages:
-#             print("sending unsent messages")
-#             await websocket.send_text(json.dumps(msg.message_data))
-#             mark_message_as_sent(db, msg.id)
 
-#     try:
-#         while True:
-#             data = await websocket.receive_text()
-#             # Process the received message and forward to MQTT broker
-#             # Publish to MQTT
-#     except WebSocketDisconnect:
-#         mark_client_disconnected(db, client_id)
-#         websocket_connections.pop(client_id, None)
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    Main WebSocket endpoint handler.
+    Accepts connections, receives messages, and processes them.
+    """
+    await websocket.accept()
+    
+    # Extract client_id from first message
+    client_id = "1"  # Default client ID
+    try:
+        first_message = await websocket.receive_text()
+        data = json.loads(first_message)
+        if data.get("client_id"):
+            client_id = str(data.get("client_id"))
+    except Exception as e:
+        print(f"No client_id provided, using default: {e}")
+    
+    # Store WebSocket connection
+    if client_id not in websocket_connections:
+        websocket_connections[client_id] = set()
+    websocket_connections[client_id].add(websocket)
+    
+    print(f"Connected client ID: {client_id}")
+    
+    try:
+        while True:
+            # Receive raw message from WebSocket
+            raw = await websocket.receive_text()
+            data = json.loads(raw)
+            
+            # Process the message
+            await handle_websocket_message(data, websocket)
+    
+    except WebSocketDisconnect:
+        print("Client disconnected:", client_id)
+        if client_id in websocket_connections:
+            websocket_connections[client_id].discard(websocket)
+            if not websocket_connections[client_id]:
+                websocket_connections.pop(client_id, None)

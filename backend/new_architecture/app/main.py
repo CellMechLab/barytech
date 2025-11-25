@@ -1,17 +1,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.message_processor import broadcast_messages, batch_processor, global_message_processor
-from app.mqtt_client import process_raw_messages
-from app.mqtt_client import start_mqtt_client, get_mqtt_client
+from app.mqtt_client_async import start_mqtt_client_forever, start_monitoring, get_mqtt_client
 from fastapi import WebSocket, WebSocketDisconnect
 from app.db import get_db, save_client_session, mark_client_disconnected
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import asyncio
-from app.websocket_manager import websocket_connections  # Import the WebSocket connections dictionary
+import os
+from app.kafka_message_processor import (
+    start_kafka_consumers_for_known_devices,
+    dynamic_kafka_consumer_manager,
+    kafka_consumer_health_monitor,
+)
+from app.websocket_manager import websocket_connections, handle_websocket_message  # Import the WebSocket connections dictionary and message handler
 from .auth import router as auth_router  # Import your auth router
-import threading
-from app.shared_state import save_flag, main_event_loop
+from app.shared_state import main_event_loop
 from app.routers import router  # Import your router
 from strawberry.asgi import GraphQL
 import strawberry
@@ -57,7 +61,7 @@ app.include_router(metrics_router)  # Mount Prometheus metrics endpoint
 @app.get("/monitoring/stats")
 async def get_monitoring_stats():
     """Get comprehensive monitoring statistics."""
-    from app.mqtt_client import get_message_stats
+    from app.mqtt_client_async import get_message_stats
     from app.message_processor import get_processing_stats
     
     mqtt_stats = get_message_stats()
@@ -79,7 +83,7 @@ async def get_monitoring_stats():
 @app.get("/monitoring/health")
 async def get_health_status():
     """Get system health status."""
-    from app.mqtt_client import get_message_stats
+    from app.mqtt_client_async import get_message_stats
     from app.message_processor import get_processing_stats
     
     mqtt_stats = get_message_stats()
@@ -117,18 +121,27 @@ async def startup_event():
     import app.shared_state
     app.shared_state.main_event_loop = asyncio.get_event_loop()
     
-    # Start the raw message processor for high-throughput message handling
-    asyncio.create_task(process_raw_messages())
-    
     # Start the global message processor for device-specific processing
     asyncio.create_task(global_message_processor())
     
     # Start monitoring stats printing
-    from app.mqtt_client import start_monitoring
     asyncio.create_task(start_monitoring())
-
-    mqtt_thread = threading.Thread(target=start_mqtt_client)
-    mqtt_thread.start()
+    
+    # Start Kafka-first async MQTT client
+    asyncio.create_task(start_mqtt_client_forever())
+    
+    # 🔥 Start Kafka-based processing pipeline when in Kafka-first mode
+    pipeline_mode = os.getenv("PIPELINE_MODE", "kafka_first").lower()
+    
+    if pipeline_mode in ("kafka_first", "both"):
+        # 1) Start consumers for all known devices from config
+        asyncio.create_task(start_kafka_consumers_for_known_devices())
+        
+        # 2) Dynamic manager: start consumers for any new device IDs that appear
+        asyncio.create_task(dynamic_kafka_consumer_manager())
+        
+        # 3) Health monitor: logs status of consumer pool
+        asyncio.create_task(kafka_consumer_health_monitor())
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -177,24 +190,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 message_type = params.get("type")
                 
                 if message_type == "slider":
-                    # Handle slider updates
-                    mqtt_client = get_mqtt_client()  # Dynamically fetch the MQTT client
+                    mqtt_client = get_mqtt_client()
                     mqtt_client.publish("PAR", json.dumps(params))
                     print(f"Published slider data to PAR: {params}")
                 
                 elif message_type == "save":
-                    # Handle save action
+                    # Extract save flag and device_id from WebSocket message
                     save_flag = params.get("save", False)
-                    print(f"Save flag received: {save_flag}")
-                    # Perform actions for save flag
-                    # For example, update a global variable or call a function
-                    handle_save_flag(save_flag)
+                    device_id = params.get("device_id")  # frontend should send this
+                    print(f"Save flag received: {save_flag} for device {device_id}")
+                    handle_save_flag(save_flag, device_id=device_id)
                 
                 else:
                     print(f"Unknown message type: {message_type}")
-                
-                # Process the received message and forward to MQTT broker
-                # Publish to MQTT
                 
         except WebSocketDisconnect:
             # Mark client as disconnected asynchronously
@@ -217,10 +225,21 @@ async def websocket_endpoint(websocket: WebSocket):
 #     except WebSocketDisconnect:
 #         print("WebSocket disconnected")
 
-def handle_save_flag(flag):
-    import app.shared_state
-    app.shared_state.save_flag = flag
-    if flag:
-        print("Save data action triggered!")
+# Handle save flag with optional per-device control
+def handle_save_flag(flag, device_id=None):
+    """
+    Set save mode for a specific device or globally.
+    
+    Args:
+        flag: Boolean indicating whether to save data
+        device_id: Optional device ID for per-device control. If None, sets global default.
+    """
+    import app.shared_state as shared_state
+
+    # If you want per-device control:
+    shared_state.set_save_mode(device_id, flag)
+
+    if device_id:
+        print(f"Save mode for {device_id} set to {flag}")
     else:
-        print("Save data action disabled.")
+        print(f"Global save mode set to {flag}")

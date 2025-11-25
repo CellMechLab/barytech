@@ -55,7 +55,12 @@ class MessageCounters:
         stats = self.get_stats()
         print(f"\n📊 MESSAGE PROCESSING STATS:")
         print(f"   MQTT Received: {stats['mqtt_received']} ({stats['mqtt_rate']:.1f}/sec)")
-        print(f"   MQTT Parsed: {stats['mqtt_parsed']} ({(stats['mqtt_parsed']/stats['mqtt_received']*100):.1f}% success)")
+        # ✅ Fix division by zero - only calculate percentage when messages have been received
+        if stats["mqtt_received"] > 0:
+            success_rate = stats["mqtt_parsed"] / stats["mqtt_received"] * 100
+            print(f"   MQTT Parsed: {stats['mqtt_parsed']} ({success_rate:.1f}% success)")
+        else:
+            print(f"   MQTT Parsed: {stats['mqtt_parsed']} (0.0% - no messages yet)")
         print(f"   MQTT Errors: {stats['mqtt_errors']}")
         print(f"   Device Queued: {stats['device_queued']}")
         print(f"   Device Processed: {stats['device_processed']} ({stats['processing_rate']:.1f}/sec)")
@@ -220,9 +225,9 @@ async def process_raw_message_batch(raw_messages: list):
         
         # Process each device's messages
         for device_id, messages in device_messages.items():
-            # Initialize device config if needed
+            # Initialize device config if needed (for device tracking, not save_flag)
             if device_id not in device_config:
-                device_config[device_id] = {"save_flag": False}
+                device_config[device_id] = {}
             
             # Ensure broadcaster is started for this device
             await start_device_broadcaster(device_id)
@@ -244,9 +249,9 @@ async def process_raw_message_batch(raw_messages: list):
                     record_message_loss("device_queue_full")
                     break
             
-            # Save messages if save flag is enabled
+            # Save messages if per-device save flag is enabled
             import app.shared_state
-            if app.shared_state.save_flag:
+            if app.shared_state.is_save_enabled(device_id):
                 from app.message_processor import device_save_queues, start_device_saver
                 await start_device_saver(device_id)
                 for message in messages:
