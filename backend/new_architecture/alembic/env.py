@@ -35,10 +35,14 @@ def run_migrations_online() -> None:
     url = config.get_main_option("sqlalchemy.url")
 
     # Use a synchronous engine for Alembic migrations
-    connectable = create_engine(
-        url.replace("postgresql+asyncpg", "postgresql"),  # Convert async to sync
-        poolclass=pool.NullPool,
-    )
+    # Handle both PostgreSQL and SQLite URLs
+    if url.startswith("sqlite"):
+        connectable = create_engine(url, poolclass=pool.NullPool)
+    else:
+        connectable = create_engine(
+            url.replace("postgresql+asyncpg", "postgresql"),  # Convert async to sync
+            poolclass=pool.NullPool,
+        )
 
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)

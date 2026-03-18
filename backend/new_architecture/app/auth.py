@@ -15,6 +15,15 @@ router = APIRouter()
 # Password hashing context
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+BCRYPT_PASSWORD_MAX_BYTES = 72
+
+
+def validate_bcrypt_password(password: str) -> None:
+    if len(password.encode("utf-8")) > BCRYPT_PASSWORD_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail="Password is too long. Use 72 UTF-8 bytes or fewer.",
+        )
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
@@ -47,6 +56,7 @@ async def register(user: UserCreate):
         if existing_user:
             raise HTTPException(status_code=400, detail="Username already registered")
 
+        validate_bcrypt_password(user.password)
         hashed_password = pwd_context.hash(user.password)
         new_user = User(username=user.username, hashed_password=hashed_password)
         db.add(new_user)
@@ -61,7 +71,15 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     async with get_db() as db:  # Consume the async generator
         result = await db.execute(select(User).where(User.username == form_data.username))
         user = result.scalars().first()
-        if not user or not pwd_context.verify(form_data.password, user.hashed_password):
+        if not user:
+            raise HTTPException(status_code=400, detail="Incorrect username or password")
+
+        try:
+            is_valid_password = pwd_context.verify(form_data.password, user.hashed_password)
+        except ValueError:
+            is_valid_password = False
+
+        if not is_valid_password:
             raise HTTPException(status_code=400, detail="Incorrect username or password")
 
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)

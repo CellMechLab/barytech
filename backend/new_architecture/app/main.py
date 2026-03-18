@@ -13,23 +13,7 @@ from .auth import router as auth_router  # Import your auth router
 import threading
 from app.shared_state import save_flag, main_event_loop
 from app.routers import router  # Import your router
-from strawberry.asgi import GraphQL
-import strawberry
-from strawberry.fastapi import GraphQLRouter
 from app.metrics import router as metrics_router  # Import Prometheus metrics router
-
-@strawberry.type
-class Query:
-    hello: str = "Hello World"
-@strawberry.type
-class Subscription:
-    @strawberry.subscription
-    async def greetings(self) -> str:
-        for name in ["Alice", "Bob", "Charlie"]:
-            yield f"Hello, {name}!"
-
-schema = strawberry.Schema(query=Query, subscription=Subscription)
-# graphql_app = GraphQLRouter(schema)
 
 app = FastAPI()
 
@@ -47,11 +31,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-graphql_app = GraphQLRouter(schema, subscription_protocols=["graphql-ws"])
 
 app.include_router(auth_router)
 app.include_router(router, prefix="/api", tags=["IoT Devices"])  # Optional: Add prefix or tags for grouping
-app.include_router(graphql_app, prefix="/graphql")
 app.include_router(metrics_router)  # Mount Prometheus metrics endpoint
 
 @app.get("/monitoring/stats")

@@ -53,9 +53,10 @@ class MessageCounters:
     
     def print_stats(self):
         stats = self.get_stats()
-        print(f"\n📊 MESSAGE PROCESSING STATS:")
+        print(f"\n[STATS] MESSAGE PROCESSING STATS:")
         print(f"   MQTT Received: {stats['mqtt_received']} ({stats['mqtt_rate']:.1f}/sec)")
-        print(f"   MQTT Parsed: {stats['mqtt_parsed']} ({(stats['mqtt_parsed']/stats['mqtt_received']*100):.1f}% success)")
+        success_rate = (stats['mqtt_parsed']/stats['mqtt_received']*100) if stats['mqtt_received'] > 0 else 0.0
+        print(f"   MQTT Parsed: {stats['mqtt_parsed']} ({success_rate:.1f}% success)")
         print(f"   MQTT Errors: {stats['mqtt_errors']}")
         print(f"   Device Queued: {stats['device_queued']}")
         print(f"   Device Processed: {stats['device_processed']} ({stats['processing_rate']:.1f}/sec)")
@@ -111,7 +112,7 @@ def on_message(client, userdata, msg):
         try:
             message_queue.put_nowait(msg.payload)
         except queue.Full:
-            print("⚠️  Warning: Message queue full - dropping message")
+            print("[WARNING] Message queue full - dropping message")
             message_counters.mqtt_errors += 1
             # PROMETHEUS: Record message loss
             from app.metrics import record_message_loss
