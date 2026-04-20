@@ -16,6 +16,15 @@ router = APIRouter()
 # Password hashing context
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+BCRYPT_PASSWORD_MAX_BYTES = 72
+
+
+def validate_bcrypt_password(password: str) -> None:
+    if len(password.encode("utf-8")) > BCRYPT_PASSWORD_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail="Password is too long. Use 72 UTF-8 bytes or fewer.",
+        )
 
 
 def normalize_password(password: str) -> str:
@@ -52,7 +61,8 @@ async def register(user: UserCreate):
         if existing_user:
             raise HTTPException(status_code=400, detail="Username already registered")
 
-        hashed_password = pwd_context.hash(normalize_password(user.password))  # ← normalize first
+        # Normalize via SHA-256 first to sidestep bcrypt's 72-byte truncation limit
+        hashed_password = pwd_context.hash(normalize_password(user.password))
         new_user = User(username=user.username, hashed_password=hashed_password)
         db.add(new_user)
         await db.commit()
@@ -65,7 +75,8 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     async with get_db() as db:
         result = await db.execute(select(User).where(User.username == form_data.username))
         user = result.scalars().first()
-        if not user or not pwd_context.verify(normalize_password(form_data.password), user.hashed_password):  # ← normalize first
+        # Normalize via SHA-256 before verifying to match the registration hash strategy
+        if not user or not pwd_context.verify(normalize_password(form_data.password), user.hashed_password):
             raise HTTPException(status_code=400, detail="Incorrect username or password")
 
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)

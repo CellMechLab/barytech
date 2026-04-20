@@ -22,6 +22,7 @@ from app.printer_router import printer_service, get_printer_status
 @strawberry.type
 class Query:
     hello: str = "Hello World"
+
 @strawberry.type
 class Subscription:
     @strawberry.subscription
@@ -58,11 +59,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-graphql_app = GraphQLRouter(schema, subscription_protocols=["graphql-ws"])
 
 app.include_router(auth_router)
 app.include_router(router, prefix="/api", tags=["IoT Devices"])  # Optional: Add prefix or tags for grouping
-app.include_router(graphql_app, prefix="/graphql")
 app.include_router(metrics_router)  # Mount Prometheus metrics endpoint
 from app.printer_router import router as printer_router
 app.include_router(printer_router)

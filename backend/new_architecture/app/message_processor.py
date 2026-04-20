@@ -63,7 +63,7 @@ def get_processing_stats():
 def print_processing_stats():
     """Print current processing statistics."""
     stats = processing_counters.get_stats()
-    print(f"\n📊 PROCESSING STATS:")
+    print(f"\n[STATS] PROCESSING STATS:")
     print(f"   Device Processed: {stats['device_processed']} ({stats['processing_rate']:.1f}/sec)")
     print(f"   Broadcast Sent: {stats['broadcast_sent']} ({stats['broadcast_rate']:.1f}/sec)")
     print(f"   Broadcast Errors: {stats['broadcast_errors']}")
@@ -182,6 +182,11 @@ async def start_device_saver(device_id: str):
         device_save_queues[device_id] = asyncio.Queue()
     if device_id not in device_savers:
         device_savers[device_id] = asyncio.create_task(batch_processor(device_id))
+
+
+async def save_device_data_batch_to_db(device_id: str, batch: list):
+    """Compatibility wrapper for batch DB writes."""
+    await process_batch(device_id, batch)
 
 async def batch_processor(device_id: str, batch_size: int = 500, interval: float = 1.0):
     """
@@ -345,25 +350,25 @@ async def broadcast_messages(device_id: str):
             # MONITORING: Count device processed messages
             processing_counters.device_processed += len(batch)
             
-            print(f"📤 Sending batch of {len(batch)} messages from {device_id} to frontend-{target_frontend}")
+            print(f"[SEND] Sending batch of {len(batch)} messages from {device_id} to frontend-{target_frontend}")
             total_messages_sent_to_frontend += len(batch)  # Update the accumulator
-            print(f"📊 Total messages sent to frontend: {total_messages_sent_to_frontend}")
+            print(f"[STATS] Total messages sent to frontend: {total_messages_sent_to_frontend}")
             
             # Send only to the target frontend
             websockets = websocket_connections.get(target_frontend, set())
-            print(f"🔍 Checking websockets for frontend-{target_frontend}: {len(websockets)} connections")
+            print(f"[CHECK] Checking websockets for frontend-{target_frontend}: {len(websockets)} connections")
             if websockets:
                 try:
                     await send_to_connected_clients_optimized(target_frontend, batch)
                     # MONITORING: Count successful broadcasts
                     processing_counters.broadcast_sent += len(batch)
-                    print(f"✅ Successfully sent {len(batch)} messages to frontend-{target_frontend}")
+                    print(f"[OK] Successfully sent {len(batch)} messages to frontend-{target_frontend}")
                 except Exception as e:
                     # MONITORING: Count broadcast errors
                     processing_counters.broadcast_errors += len(batch)
-                    print(f"❌ Error sending to frontend-{target_frontend}: {e}")
+                    print(f"[ERROR] Error sending to frontend-{target_frontend}: {e}")
             else:
-                print(f"⚠️  No WebSocket connections found for frontend-{target_frontend}")
+                print(f"[WARNING] No WebSocket connections found for frontend-{target_frontend}")
         else:
             # No messages collected in this cycle, sleep briefly to reduce CPU usage
             await asyncio.sleep(0.005)  # Reduced sleep time
