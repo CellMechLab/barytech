@@ -83,7 +83,7 @@ const DraggableBox = ({
       onMouseLeave={() => setIsHovered(false)}
     >
       {/* Container for the hover icons */}
-      <Box
+      {/* <Box
         sx={{
           position: "absolute",
           top: 2,
@@ -94,8 +94,8 @@ const DraggableBox = ({
           opacity: isHovered ? 1 : 0, // Fade in on hover
           transition: "transform 0.3s ease, opacity 0.3s ease", // Transition for smooth effect
         }}
-      >
-        <Box
+      > */}
+        {/* <Box
           ref={drag} // Drag functionality only attached to this section
           sx={{
             width: "100%",
@@ -109,12 +109,12 @@ const DraggableBox = ({
             borderTopRightRadius: "15px",
           }}
         >
-          <DragIndicator fontSize="small" />
-        </Box>
+          <DragIndicator fontSize="small" /> */}
+        {/* </Box> */}
         {/* <IconButton size="small" sx={{ color: "grey" }} color="inherit">
           <DragIndicator fontSize="small" />
         </IconButton> */}
-        <IconButton onClick={handleSidebarToggle} size="small" sx={{ color: "grey" }} color="primary">
+        {/* <IconButton onClick={handleSidebarToggle} size="small" sx={{ color: "grey" }} color="primary">
           <Edit fontSize="small" />
         </IconButton>
         <IconButton
@@ -124,8 +124,8 @@ const DraggableBox = ({
           color="error"
         >
           <Delete fontSize="small" />
-        </IconButton>
-      </Box>
+        </IconButton> */}
+      {/* </Box> */}
 
       {children}
       {id === 4 || id === 3 ? (
