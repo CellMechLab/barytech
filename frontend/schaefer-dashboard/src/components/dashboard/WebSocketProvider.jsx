@@ -1,3 +1,4 @@
+// Provides shared live data-stream and printer-status WebSocket state to the dashboard layout.
 import React, { createContext, useEffect, useState } from "react";
 import { Toaster, toast } from "sonner"; // Import Sonner's Toaster and toast
 import { useUser } from "../../context/UserContext"; // Import your UserContext
@@ -11,10 +12,21 @@ export const WebSocketContext = createContext(null);
 export const WebSocketProvider = ({ children }) => {
   const { user } = useUser(); // Get the login function from UserContext
 
+  // Stores the backend base URL used to build the printer status WebSocket endpoint.
+  const backendApiUrl = process.env.REACT_APP_API_URL || "http://localhost:8000";
+
   const [socket, setSocket] = useState(null);
   const [dataBuffer, setDataBuffer] = useState([]); // State to hold received data
   const [dataBuffer1, setDataBuffer1] = useState([]); // State to hold received data
   const [connected, setConnected] = useState(false);
+  // Tracks whether the shared printer-status WebSocket is currently open.
+  const [printerSocketConnected, setPrinterSocketConnected] = useState(false);
+  // Stores the latest XYZ position received from the printer-status stream.
+  const [printerPosition, setPrinterPosition] = useState({ x: null, y: null, z: null });
+  // Stores the latest bed temperature reported by the printer-status stream.
+  const [bedTemperature, setBedTemperature] = useState(null);
+  // Stores the latest hotend temperature reported by the printer-status stream.
+  const [hotendTemperature, setHotendTemperature] = useState(null);
   useEffect(() => {
     if (!user) {
       setDataBuffer([]); // Reset when user is null
@@ -23,6 +35,95 @@ export const WebSocketProvider = ({ children }) => {
   // Accumulators for tracking received points
   const [batchCount, setBatchCount] = useState(0); // Points in the current batch
   const [totalPoints, setTotalPoints] = useState(0); // Total points received
+
+  useEffect(() => {
+    if (!user) {
+      setPrinterSocketConnected(false);
+      setPrinterPosition({ x: null, y: null, z: null });
+      setBedTemperature(null);
+      setHotendTemperature(null);
+      return undefined;
+    }
+
+    // Converts the configured backend HTTP URL into the printer-status WebSocket endpoint.
+    const printerStatusSocketUrl =
+      backendApiUrl.replace(/^http/, "ws") + "/ws/printer";
+
+    // Keeps track of whether cleanup requested that reconnect attempts stop.
+    let shouldReconnect = true;
+    // Stores the reconnect timer so cleanup can cancel pending retries.
+    let reconnectTimeoutId = null;
+    // Stores the current printer WebSocket so cleanup always closes the latest socket.
+    let printerSocket = null;
+
+    // Opens the shared printer-status socket and refreshes connection state on each lifecycle event.
+    const connectPrinterStatusWebSocket = () => {
+      if (!shouldReconnect) {
+        return;
+      }
+
+      printerSocket = new WebSocket(printerStatusSocketUrl);
+
+      printerSocket.onopen = () => {
+        setPrinterSocketConnected(true);
+      };
+
+      printerSocket.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+
+          // Ignores unrelated message types so only printer status updates affect UI state.
+          if (message.type !== "printer_status") {
+            return;
+          }
+
+          // Reads the latest position and temperature values from the printer payload.
+          const { position = {}, temperatures = {} } = message;
+
+          setPrinterPosition({
+            x: position.X ?? position.x ?? null,
+            y: position.Y ?? position.y ?? null,
+            z: position.Z ?? position.z ?? null,
+          });
+          setBedTemperature(temperatures.bed_temp ?? null);
+          setHotendTemperature(temperatures.hotend_temp ?? null);
+        } catch (error) {
+          // Prevents malformed payloads from crashing the shared status stream handler.
+          console.error("[printer WS] parse error:", error);
+        }
+      };
+
+      printerSocket.onclose = () => {
+        setPrinterSocketConnected(false);
+
+        // Retries after transient disconnects so the header indicator can recover automatically.
+        if (shouldReconnect) {
+          reconnectTimeoutId = window.setTimeout(
+            connectPrinterStatusWebSocket,
+            3000
+          );
+        }
+      };
+
+      printerSocket.onerror = (error) => {
+        // Surfaces browser-level socket errors while letting onclose drive reconnect behavior.
+        console.error("[printer WS] error:", error);
+      };
+    };
+
+    connectPrinterStatusWebSocket();
+
+    return () => {
+      shouldReconnect = false;
+
+      if (reconnectTimeoutId !== null) {
+        window.clearTimeout(reconnectTimeoutId);
+      }
+
+      setPrinterSocketConnected(false);
+      printerSocket?.close();
+    };
+  }, [backendApiUrl, user]);
 
   const connectWebSocket = () => {
     const newSocket = new WebSocket("ws://127.0.0.1:8000/ws");
@@ -164,6 +265,10 @@ export const WebSocketProvider = ({ children }) => {
         connected,
         dataBuffer1,
         setDataBuffer1,
+        printerSocketConnected,
+        printerPosition,
+        bedTemperature,
+        hotendTemperature,
       }}
     >
       <Toaster position="bottom-right" /> {/* Add the Toaster component */}

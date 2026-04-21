@@ -9,6 +9,7 @@ from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from app.config import settings
 from sqlalchemy.future import select
+import hashlib
 
 router = APIRouter()
 
@@ -24,6 +25,10 @@ def validate_bcrypt_password(password: str) -> None:
             status_code=400,
             detail="Password is too long. Use 72 UTF-8 bytes or fewer.",
         )
+
+
+def normalize_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
@@ -50,14 +55,14 @@ async def get_current_user_id(token: str = Depends(oauth2_scheme)) -> int:
 
 @router.post("/register")
 async def register(user: UserCreate):
-    async with get_db() as db:  # Consume the async generator
+    async with get_db() as db:
         result = await db.execute(select(User).where(User.username == user.username))
         existing_user = result.scalars().first()
         if existing_user:
             raise HTTPException(status_code=400, detail="Username already registered")
 
-        validate_bcrypt_password(user.password)
-        hashed_password = pwd_context.hash(user.password)
+        # Normalize via SHA-256 first to sidestep bcrypt's 72-byte truncation limit
+        hashed_password = pwd_context.hash(normalize_password(user.password))
         new_user = User(username=user.username, hashed_password=hashed_password)
         db.add(new_user)
         await db.commit()
@@ -65,27 +70,21 @@ async def register(user: UserCreate):
         return {"msg": "User registered successfully"}
 
 
-
 @router.post("/token")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    async with get_db() as db:  # Consume the async generator
+    async with get_db() as db:
         result = await db.execute(select(User).where(User.username == form_data.username))
         user = result.scalars().first()
-        if not user:
-            raise HTTPException(status_code=400, detail="Incorrect username or password")
-
-        try:
-            is_valid_password = pwd_context.verify(form_data.password, user.hashed_password)
-        except ValueError:
-            is_valid_password = False
-
-        if not is_valid_password:
+        # Normalize via SHA-256 before verifying to match the registration hash strategy
+        if not user or not pwd_context.verify(normalize_password(form_data.password), user.hashed_password):
             raise HTTPException(status_code=400, detail="Incorrect username or password")
 
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(data={"sub": user.username, "user_id": user.id}, expires_delta=access_token_expires)
+        access_token = create_access_token(
+            data={"sub": user.username, "user_id": user.id},
+            expires_delta=access_token_expires
+        )
         return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
-
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user(user_id: int = Depends(get_current_user_id)):

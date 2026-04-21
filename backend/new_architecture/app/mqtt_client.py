@@ -53,9 +53,10 @@ class MessageCounters:
     
     def print_stats(self):
         stats = self.get_stats()
-        print(f"\n[STATS] MESSAGE PROCESSING STATS:")
+        # Guard against division-by-zero when no messages have been received yet
+        success_rate = (stats['mqtt_parsed'] / stats['mqtt_received'] * 100) if stats['mqtt_received'] > 0 else 0.0
+        print(f"\n📊 MESSAGE PROCESSING STATS:")
         print(f"   MQTT Received: {stats['mqtt_received']} ({stats['mqtt_rate']:.1f}/sec)")
-        success_rate = (stats['mqtt_parsed']/stats['mqtt_received']*100) if stats['mqtt_received'] > 0 else 0.0
         print(f"   MQTT Parsed: {stats['mqtt_parsed']} ({success_rate:.1f}% success)")
         print(f"   MQTT Errors: {stats['mqtt_errors']}")
         print(f"   Device Queued: {stats['device_queued']}")

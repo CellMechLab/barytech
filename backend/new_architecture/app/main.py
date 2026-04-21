@@ -1,28 +1,56 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from app.message_processor import broadcast_messages, batch_processor, global_message_processor
 from app.mqtt_client import process_raw_messages
 from app.mqtt_client import start_mqtt_client, get_mqtt_client
-from fastapi import WebSocket, WebSocketDisconnect
 from app.db import get_db, save_client_session, mark_client_disconnected
-from fastapi.middleware.cors import CORSMiddleware
 import json
 import asyncio
-from app.websocket_manager import websocket_connections  # Import the WebSocket connections dictionary
-from .auth import router as auth_router  # Import your auth router
 import threading
+from contextlib import asynccontextmanager
+from app.websocket_manager import websocket_connections
+from .auth import router as auth_router
 from app.shared_state import save_flag, main_event_loop
-from app.routers import router  # Import your router
-from app.metrics import router as metrics_router  # Import Prometheus metrics router
+from app.routers import router
+from strawberry.asgi import GraphQL
+import strawberry
+from strawberry.fastapi import GraphQLRouter
+from app.metrics import router as metrics_router
+from app.printer_router import printer_service, get_printer_status
 
-app = FastAPI()
+
+@strawberry.type
+class Query:
+    hello: str = "Hello World"
+
+@strawberry.type
+class Subscription:
+    @strawberry.subscription
+    async def greetings(self) -> str:
+        for name in ["Alice", "Bob", "Charlie"]:
+            yield f"Hello, {name}!"
+
+schema = strawberry.Schema(query=Query, subscription=Subscription)
+# graphql_app = GraphQLRouter(schema)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Open persistent WebSocket connection to the Pi on startup.
+    await printer_service.connect()
+    yield
+    # Close cleanly on shutdown.
+    await printer_service.disconnect()
+
+
+app = FastAPI(lifespan=lifespan)
 
 origins = [
+    "*"
     # "http://localhost",
     # "http://localhost:8080",  # Adjust based on your frontend's address
-    "http://localhost:3000",
-    "http://127.0.0.1:3001",
-    "http://localhost:3001",
+    # "http://localhost:3000",
+    # "http://127.0.0.1:3001",
+    # "http://localhost:3001",
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -35,6 +63,8 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(router, prefix="/api", tags=["IoT Devices"])  # Optional: Add prefix or tags for grouping
 app.include_router(metrics_router)  # Mount Prometheus metrics endpoint
+from app.printer_router import router as printer_router
+app.include_router(printer_router)
 
 @app.get("/monitoring/stats")
 async def get_monitoring_stats():
@@ -93,24 +123,6 @@ async def get_health_status():
         health_status["status"] = "degraded"
     
     return health_status
-
-@app.on_event("startup")
-async def startup_event():
-    import app.shared_state
-    app.shared_state.main_event_loop = asyncio.get_event_loop()
-    
-    # Start the raw message processor for high-throughput message handling
-    asyncio.create_task(process_raw_messages())
-    
-    # Start the global message processor for device-specific processing
-    asyncio.create_task(global_message_processor())
-    
-    # Start monitoring stats printing
-    from app.mqtt_client import start_monitoring
-    asyncio.create_task(start_monitoring())
-
-    mqtt_thread = threading.Thread(target=start_mqtt_client)
-    mqtt_thread.start()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -198,6 +210,107 @@ async def websocket_endpoint(websocket: WebSocket):
 #                 print(f"Unexpected message: {message}")
 #     except WebSocketDisconnect:
 #         print("WebSocket disconnected")
+
+# Interval in seconds between printer status pushes over /ws/printer
+_PRINTER_STATUS_INTERVAL = 2.0
+
+# Actions the frontend is allowed to trigger over /ws/printer
+_ALLOWED_PRINTER_ACTIONS = {
+    "connect", "disconnect", "status",
+    "move", "move_up",
+    "position", "temperature",
+    "gcode", "emergency_stop",
+}
+
+
+@app.websocket("/ws/printer")
+async def printer_status_ws(websocket: WebSocket):
+    """
+    Bidirectional WebSocket for the printer dashboard.
+
+    ── Server → Client (push, every _PRINTER_STATUS_INTERVAL seconds) ──────
+        {
+          "type":         "printer_status",
+          "position":     { "X": float, "Y": float, "Z": float, "E": float },
+          "temperatures": { "hotend_temp": float|null, "bed_temp": float|null }
+        }
+
+    ── Client → Server (command frames) ────────────────────────────────────
+        { "action": "move",    "params": { "axis": "X", "distance": 10.0 } }
+        { "action": "move_up", "params": { "distance": 1.0, "feed": 1200 } }
+        { "action": "gcode",   "params": { "command": "M503" } }
+        { "action": "emergency_stop" }
+        … any action listed in _ALLOWED_PRINTER_ACTIONS
+
+    ── Server → Client (command reply) ─────────────────────────────────────
+        { "type": "command_result", "action": "<action>",
+          "ok": true,  "data":   { ... } }
+        { "type": "command_result", "action": "<action>",
+          "ok": false, "error":  "..." }
+    """
+    from app.printer_router import _ws_client   # shared singleton
+
+    await websocket.accept()
+    print("[/ws/printer] client connected")
+
+    # ── Background task: push live status every N seconds ──────────────────
+    async def push_loop() -> None:
+        while True:
+            status = await get_printer_status()
+            try:
+                await websocket.send_json({"type": "printer_status", **status})
+            except Exception:
+                break               # client gone — exit quietly
+            await asyncio.sleep(_PRINTER_STATUS_INTERVAL)
+
+    push_task = asyncio.create_task(push_loop())
+
+    # ── Foreground: process incoming command frames ─────────────────────────
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg    = json.loads(raw)
+                action = msg.get("action", "")
+                params = msg.get("params") or {}
+            except (json.JSONDecodeError, AttributeError):
+                await websocket.send_json({
+                    "type": "command_result", "action": "?",
+                    "ok": False, "error": "Invalid JSON frame",
+                })
+                continue
+
+            if action not in _ALLOWED_PRINTER_ACTIONS:
+                await websocket.send_json({
+                    "type": "command_result", "action": action,
+                    "ok": False,
+                    "error": f"Unknown action '{action}'. "
+                             f"Allowed: {sorted(_ALLOWED_PRINTER_ACTIONS)}",
+                })
+                continue
+
+            # Forward the command to the Pi via the shared WS client
+            try:
+                timeout = float(params.pop("timeout", 60.0)) if action == "gcode" else 60.0
+                data    = await _ws_client.call(action, params, timeout=timeout)
+                await websocket.send_json({
+                    "type": "command_result", "action": action,
+                    "ok": True, "data": data,
+                })
+            except Exception as exc:
+                detail = getattr(exc, "detail", str(exc))
+                await websocket.send_json({
+                    "type": "command_result", "action": action,
+                    "ok": False, "error": detail,
+                })
+
+    except WebSocketDisconnect:
+        print("[/ws/printer] client disconnected")
+    except Exception as exc:
+        print(f"[/ws/printer] unexpected error: {exc}")
+    finally:
+        push_task.cancel()
+
 
 def handle_save_flag(flag):
     import app.shared_state

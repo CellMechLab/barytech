@@ -1,3 +1,4 @@
+// Renders the global top bar, including the live printer connection status indicator.
 import React, { useContext, useState } from "react";
 import {
   Box,
@@ -35,7 +36,8 @@ const Topbar = () => {
   const colorMode = useContext(ColorModeContext);
   const navigate = useNavigate();
   const { user, logout } = useUser();
-  const { connected } = useContext(WebSocketContext);
+  // Reads the shared printer WebSocket status so the header circle reflects the live printer link.
+  const { printerSocketConnected } = useContext(WebSocketContext);
   const [modalOpen, setModalOpen] = useState(false);
   const [anchorEl, setAnchorEl] = useState(null);
   const [interval, setInterval] = useState("1 min");
@@ -147,7 +149,7 @@ const Topbar = () => {
           <CircleIcon
             fontSize="small"
             sx={{
-              color: connected
+              color: printerSocketConnected
                 ? colors.greenAccent[200]
                 : colors.redAccent[500],
               mr: 1,

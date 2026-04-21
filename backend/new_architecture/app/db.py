@@ -11,7 +11,7 @@ import pandas as pd
 
 logging.basicConfig(level=logging.DEBUG)
 # SQLite async database URL (you can use other databases like PostgreSQL or MySQL)
-DATABASE_URL = "sqlite+aiosqlite:///./schaefer.db"
+DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5432/schaefer"
 
 # Create an async engine
 async_engine = create_async_engine(
