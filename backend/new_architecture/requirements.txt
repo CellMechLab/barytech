@@ -4,6 +4,8 @@ uvicorn[standard]==0.41.0
 sqlalchemy==2.0.48
 asyncpg==0.31.0
 alembic==1.18.4
+websockets==15.0.1
+strawberry-graphql==0.284.1
 
 # Data processing
 orjson==3.11.7
