@@ -37,7 +37,6 @@ Auto-reconnect behaviour
 
 import asyncio
 import json
-import os
 import uuid
 from typing import Optional
 
@@ -45,14 +44,14 @@ import websockets
 import websockets.exceptions
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import JSONResponse
+from app.config import settings
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-PRINTER_WS_URL: str = os.getenv(
-    "PRINTER_WS_URL", "ws://10.99.134.8:8003/ws"
-)
+# Uses centralized settings so the router always respects backend/new_architecture/.env.
+PRINTER_WS_URL: str = settings.PRINTER_WS_URL
 
 router = APIRouter(prefix="/printer", tags=["3D Printer"])
 
