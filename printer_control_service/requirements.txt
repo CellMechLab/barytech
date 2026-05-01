@@ -1,0 +1,8 @@
+# Core API server for printer control endpoints.
+fastapi
+
+# ASGI server used to run the FastAPI application.
+uvicorn[standard]
+
+# Serial communication driver used by printer.py.
+pyserial
