@@ -3,6 +3,7 @@ import React, { createContext, useEffect, useState } from "react";
 import { Toaster, toast } from "sonner"; // Import Sonner's Toaster and toast
 import { useUser } from "../../context/UserContext"; // Import your UserContext
 import pako from "pako"; // Import pako for decompression
+import { buildWebSocketUrl } from "../../config/endpoints";
 
 
 // Create a WebSocket context
@@ -126,7 +127,7 @@ export const WebSocketProvider = ({ children }) => {
   }, [backendApiUrl, user]);
 
   const connectWebSocket = () => {
-    const newSocket = new WebSocket("ws://127.0.0.1:8000/ws");
+    const newSocket = new WebSocket(buildWebSocketUrl("/ws"));
     const client_id = user.user_id; // Define the client ID
 
     newSocket.onopen = () => {

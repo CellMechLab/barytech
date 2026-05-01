@@ -32,6 +32,7 @@ import LinkIcon from "@mui/icons-material/Link";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import FileUploadIcon from "@mui/icons-material/FileUpload";
+import { VIDEO_BASE_URL } from "../../config/endpoints";
 
 const Dashboard = () => {
   // Stores backend base URL used for printer and export API calls.
@@ -490,7 +491,7 @@ const Dashboard = () => {
                 {/* Width 100% ensures the feed container spans the full right-column width. */}
                 <Box flexGrow={1} minHeight={0} display="flex" alignItems="center" justifyContent="center" width="100%">
                   <img
-                    src={`${process.env.REACT_APP_CAMERA_URL}/video`}
+                    src={`${VIDEO_BASE_URL}/video`}
                     alt="Live stream"
                     style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: "4px" }}
                   />
@@ -811,8 +812,6 @@ const Dashboard = () => {
       window.removeEventListener("resize", updateGridColumns);
     };
   }, []);
-
-
 
   return (
     <Box m={dashboardOuterMargin}>

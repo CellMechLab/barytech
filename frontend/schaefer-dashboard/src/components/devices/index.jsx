@@ -11,6 +11,7 @@ import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import axios from "axios";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
+import { buildBackendUrl } from "../../config/endpoints";
 
 const IoTDevices = () => {
   const theme = useTheme();
@@ -34,7 +35,7 @@ const IoTDevices = () => {
           return;
         }
 
-        const response = await axios.get("http://127.0.0.1:8000/api/devices/", {
+        const response = await axios.get(buildBackendUrl("/api/devices/"), {
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -95,7 +96,7 @@ const IoTDevices = () => {
         return;
       }
       console.log("selection", selectionModel)
-      await axios.delete("http://127.0.0.1:8000/api/devices/", {
+      await axios.delete(buildBackendUrl("/api/devices/"), {
         headers: { Authorization: `Bearer ${token}` },
         data: { device_ids: selectionModel }, // Pass selected IDs in the request body
       });

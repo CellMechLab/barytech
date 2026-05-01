@@ -8,6 +8,7 @@ import { useTheme } from "@mui/material";
 import axios from "axios";
 import { toast, Toaster } from "sonner";
 import { useNavigate } from "react-router-dom";
+import { buildBackendUrl } from "../../config/endpoints";
 
 const DeviceDataTable = () => {
   const theme = useTheme();
@@ -35,7 +36,7 @@ const DeviceDataTable = () => {
         }
 
         const response = await axios.get(
-          "http://127.0.0.1:8000/api/device-data/",
+          buildBackendUrl("/api/device-data/"),
           {
             headers: {
               Authorization: `Bearer ${token}`,
@@ -92,7 +93,7 @@ const DeviceDataTable = () => {
       }
   
       // Send a single delete request with an array of IDs in the body
-      await axios.delete("http://127.0.0.1:8000/api/device-data/", {
+      await axios.delete(buildBackendUrl("/api/device-data/"), {
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",

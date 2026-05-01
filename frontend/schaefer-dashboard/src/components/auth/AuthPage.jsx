@@ -4,9 +4,7 @@ import Login from "./Login";
 import Register from "./Register";
 import { useNavigate,useLocation } from "react-router-dom"; // Import useNavigate
 import { useUser } from "../../context/UserContext"; // Import your UserContext
-// At the top of the file, after imports
-const API_URL = process.env.REACT_APP_API_URL; // or process.env.REACT_APP_API_URL
-
+import { buildBackendUrl } from "../../config/endpoints";
 
 const AuthPage = () => {
   const [isLogin, setIsLogin] = useState(true);
@@ -18,7 +16,7 @@ const AuthPage = () => {
     if (token) {
       const fetchUser = async () => {
         try {
-          const response = await fetch(`${API_URL}/me`, {
+          const response = await fetch(buildBackendUrl("/me"), {
             headers: {
               Authorization: `Bearer ${token}`,
             },
@@ -53,7 +51,7 @@ const AuthPage = () => {
 
   const handleLoginSubmit = async (data) => {
     try {
-      const response = await fetch(`${API_URL}/token`, {
+      const response = await fetch(buildBackendUrl("/token"), {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
@@ -83,7 +81,7 @@ const AuthPage = () => {
 
   const handleRegisterSubmit = async (data) => {
     try {
-      const response = await fetch(`${API_URL}/register`, {
+      const response = await fetch(buildBackendUrl("/register"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

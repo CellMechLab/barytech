@@ -22,8 +22,7 @@ import {
   Wifi as WifiIcon,
   Speed as SpeedIcon
 } from '@mui/icons-material';
-
-const API_BASE = 'http://localhost:8000';
+import { buildBackendUrl } from '../../config/endpoints';
 
 const AdminPanel = () => {
   const [metrics, setMetrics] = useState(null);
@@ -34,7 +33,7 @@ const AdminPanel = () => {
 
   const fetchMetrics = async () => {
     try {
-      const response = await fetch(`${API_BASE}/monitoring/stats`);
+      const response = await fetch(buildBackendUrl('/monitoring/stats'));
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
@@ -47,7 +46,7 @@ const AdminPanel = () => {
 
   const fetchHealth = async () => {
     try {
-      const response = await fetch(`${API_BASE}/monitoring/health`);
+      const response = await fetch(buildBackendUrl('/monitoring/health'));
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }

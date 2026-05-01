@@ -8,6 +8,7 @@ import Header from "../dashboard/Header";
 import axios from "axios";
 import { toast, Toaster } from "sonner"; // Import Sonner's toast and Toaster
 import { useNavigate } from "react-router-dom"; // For navigation
+import { buildBackendUrl } from "../../config/endpoints";
 
 const IoTDeviceForm = () => {
   const isNonMobile = useMediaQuery("(min-width:600px)");
@@ -40,7 +41,7 @@ const IoTDeviceForm = () => {
         device_type: data.device_type,
       };
 
-      const response = await axios.post("http://127.0.0.1:8000/api/devices/", requestData, {
+      const response = await axios.post(buildBackendUrl("/api/devices/"), requestData, {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
