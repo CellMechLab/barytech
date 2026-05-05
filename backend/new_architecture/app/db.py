@@ -1,7 +1,10 @@
+"""Database access layer for async SQLAlchemy sessions and persistence helpers."""
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.future import select
 from app.models import Base, DeviceData, ClientSession, IoTDevice
+from app.config import settings
 from datetime import datetime
 from fastapi import HTTPException
 from contextlib import asynccontextmanager
@@ -10,8 +13,8 @@ from sqlalchemy import insert
 import pandas as pd
 
 logging.basicConfig(level=logging.DEBUG)
-# SQLite async database URL (you can use other databases like PostgreSQL or MySQL)
-DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5432/schaefer"
+# Stores the runtime database URL loaded from environment settings.
+DATABASE_URL = settings.DATABASE_URL
 
 # Create an async engine
 async_engine = create_async_engine(

@@ -2,8 +2,8 @@
 
 import React, { useState } from "react";
 import { BrowserRouter as Router, Route, Routes } from "react-router-dom";
-import { DndProvider } from "react-dnd";
-import { HTML5Backend } from "react-dnd-html5-backend";
+// import { DndProvider } from "react-dnd";
+// import { HTML5Backend } from "react-dnd-html5-backend";
 import { WebSocketProvider } from "./components/dashboard/WebSocketProvider";
 import { ColorModeContext, useMode } from "./theme";
 import { CssBaseline, ThemeProvider } from "@mui/material";
@@ -29,7 +29,8 @@ const App = () => {
           <Router>
             <WebSocketProvider>
               <SaveProvider>
-                <DndProvider backend={HTML5Backend}>
+                {/* DnD is disabled to avoid requiring removed react-dnd dependencies */}
+                {/* <DndProvider backend={HTML5Backend}> */}
                   <Routes>
                     {/* Route without Layout */}
                     <Route path="/auth" element={<AuthPage />} />
@@ -51,7 +52,7 @@ const App = () => {
                       <Route path="/admin" element={<AdminPanel />} />
                     </Route>
                   </Routes>
-                </DndProvider>
+                {/* </DndProvider> */}
               </SaveProvider>
             </WebSocketProvider>
           </Router>

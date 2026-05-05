@@ -1,57 +1,47 @@
 import React, { useState } from "react";
-import { Box, IconButton } from "@mui/material";
-import { useDrag, useDrop } from "react-dnd";
-import { Edit, Delete, DragIndicator } from "@mui/icons-material"; // Import DragIndicator
+import { Box } from "@mui/material";
+// import { useDrag, useDrop } from "react-dnd";
+// import { Edit, Delete, DragIndicator } from "@mui/icons-material"; // Import DragIndicator
 // import { opacity } from "html2canvas/dist/types/css/property-descriptors/opacity";
 import { useOutletContext } from "react-router-dom";
 import LineChartWithArea from "./LineChartWithArea";
 
-const ItemTypes = {
-  BOX: "box",
-};
-
 const DraggableBox = ({
   id,
   children,
-  onDrop,
   backgroundColor,
-  handleDelete,
   gridColumn,
   gridRow,
-  onHover,
   lineColor,
   areaColor,
   data
 }) => {
-  const [{ isDragging }, drag] = useDrag({
-    type: ItemTypes.BOX,
-    item: { id, gridColumn, gridRow },
-    collect: (monitor) => ({
-      isDragging: !!monitor.isDragging(),
-    }),
-  });
-  // console.log(lineColor, areaColor, id)
-  const [, drop] = useDrop({
-    accept: ItemTypes.BOX,
-    hover: (item) => {
-      if (item.id !== id) {
-        onHover(item.id, id); // Call onHover to update positions while hovering
-      }
-    },
-    drop: (item) => {
-      if (item.id !== id) {
-        onDrop(item.id, id); // Finalize the drop
-      }
-    },
-  });
+  // DnD functionality is intentionally disabled.
+  // const [{ isDragging }, drag] = useDrag({
+  //   type: ItemTypes.BOX,
+  //   item: { id, gridColumn, gridRow },
+  //   collect: (monitor) => ({
+  //     isDragging: !!monitor.isDragging(),
+  //   }),
+  // });
+  // const [, drop] = useDrop({
+  //   accept: ItemTypes.BOX,
+  //   hover: (item) => {
+  //     if (item.id !== id) {
+  //       onHover(item.id, id); // Call onHover to update positions while hovering
+  //     }
+  //   },
+  //   drop: (item) => {
+  //     if (item.id !== id) {
+  //       onDrop(item.id, id); // Finalize the drop
+  //     }
+  //   },
+  // });
 
   // State to control hover visibility
   const [isHovered, setIsHovered] = useState(false);
   const { setIsSideBar } = useOutletContext(); // Get setIsSidebar from Layout
-  // Function to toggle the right sidebar visibility
-  const handleSidebarToggle = () => {
-    setIsSideBar((prevState) => !prevState);
-  };
+  void setIsSideBar;
   const flexStyles =
   id === 3 || id === 4
     ? {} // Do not apply center alignment
@@ -61,7 +51,6 @@ const DraggableBox = ({
       };
   return (
     <Box
-      ref={(node) => drag(drop(node))}
       gridColumn={gridColumn}
       gridRow={gridRow}
       backgroundColor={backgroundColor}
@@ -69,8 +58,7 @@ const DraggableBox = ({
       flexDirection="column"
       {...flexStyles} // Spread conditionally applied styles
       style={{
-        border: isDragging ? "5px solid lightblue" : "",
-        cursor: "move",
+        cursor: "default",
         boxShadow: isHovered
           ? "0px 4px 8px rgba(0, 0, 0, 0.2)"
           : "0px 2px 4px rgba(0, 0, 0, 0.1)",
