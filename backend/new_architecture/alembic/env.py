@@ -3,6 +3,7 @@ from sqlalchemy import engine_from_config, create_engine, pool
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from alembic import context
 from app.models import Base  # Replace with the path to your models
+from app.config import settings
 
 # This is the Alembic Config object, which provides access to the values within
 # the .ini file in use.
@@ -32,7 +33,10 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
-    url = config.get_main_option("sqlalchemy.url")
+    # Stores the database URL from environment-backed settings to keep Alembic aligned with app runtime config.
+    settings_database_url = settings.DATABASE_URL
+    # Falls back to alembic.ini only if DATABASE_URL is not provided in environment settings.
+    url = settings_database_url or config.get_main_option("sqlalchemy.url")
 
     # Use a synchronous engine for Alembic migrations
     # Handle both PostgreSQL and SQLite URLs
