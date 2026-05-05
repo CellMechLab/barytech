@@ -1,3 +1,5 @@
+"""FastAPI application entrypoint for WebSocket, printer, and MQTT services."""
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from app.message_processor import broadcast_messages, batch_processor, global_message_processor
@@ -35,9 +37,39 @@ schema = strawberry.Schema(query=Query, subscription=Subscription)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Stores background task for draining MQTT thread queue into async processing.
+    raw_message_processor_task = None
+    # Stores background task for periodic MQTT/processing monitoring logs.
+    monitoring_task = None
+
     # Open persistent WebSocket connection to the Pi on startup.
     await printer_service.connect()
+
+    # Initialize MQTT client and subscribe to broker topics during API startup.
+    start_mqtt_client()
+    # Runs continuous raw-message batch processing without blocking startup.
+    raw_message_processor_task = asyncio.create_task(process_raw_messages())
+    # Runs periodic monitoring output for pipeline health and throughput visibility.
+    from app.mqtt_client import start_monitoring
+    monitoring_task = asyncio.create_task(start_monitoring())
+
     yield
+
+    # Prevent noisy cancellation warnings when stopping background worker tasks.
+    if raw_message_processor_task:
+        raw_message_processor_task.cancel()
+        try:
+            await raw_message_processor_task
+        except asyncio.CancelledError:
+            pass
+    # Prevent noisy cancellation warnings when stopping periodic monitor task.
+    if monitoring_task:
+        monitoring_task.cancel()
+        try:
+            await monitoring_task
+        except asyncio.CancelledError:
+            pass
+
     # Close cleanly on shutdown.
     await printer_service.disconnect()
 
