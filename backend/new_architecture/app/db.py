@@ -15,15 +15,34 @@ import pandas as pd
 logging.basicConfig(level=logging.DEBUG)
 # Stores the runtime database URL loaded from environment settings.
 DATABASE_URL = settings.DATABASE_URL
+# Stores database URL rewritten to use async SQLAlchemy drivers when needed.
+normalized_database_url = DATABASE_URL
+
+# Convert sync SQLite URL to async SQLite driver required by SQLAlchemy asyncio.
+if DATABASE_URL.startswith("sqlite:///"):
+    normalized_database_url = DATABASE_URL.replace("sqlite:///", "sqlite+aiosqlite:///", 1)
+# Convert sqlite URL variant without triple slash to async driver variant.
+elif DATABASE_URL.startswith("sqlite://"):
+    normalized_database_url = DATABASE_URL.replace("sqlite://", "sqlite+aiosqlite://", 1)
+
+# Holds common async engine options used across all supported database backends.
+engine_options = {
+    "echo": True,
+}
+
+# Apply connection pool tuning only for network database backends.
+if not normalized_database_url.startswith("sqlite+aiosqlite://"):
+    engine_options.update({
+        "pool_size": 20,         # Maximum number of connections in the pool
+        "max_overflow": 40,      # Number of extra connections allowed
+        "pool_timeout": 60,      # Timeout (in seconds) to acquire a connection
+    })
 
 # Create an async engine
 async_engine = create_async_engine(
-    DATABASE_URL, 
-    echo=True, 
-    pool_size=20,         # Maximum number of connections in the pool
-    max_overflow=40,      # Number of extra connections allowed
-    pool_timeout=60,      # Timeout (in seconds) to acquire a connection
-    )
+    normalized_database_url,
+    **engine_options,
+)
 
 # Create an async session factory
 AsyncSessionLocal = sessionmaker(
