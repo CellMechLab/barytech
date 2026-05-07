@@ -1,10 +1,8 @@
 // Encapsulates printer command state and consumes shared printer-status WebSocket data.
 // Exposes a single hook so Dashboard components stay free of low-level fetch / WS logic.
 import { useContext, useState } from "react";
+import { BACKEND_BASE_URL } from "../../../config/endpoints";
 import { WebSocketContext } from "../WebSocketProvider";
-
-// Reads the backend base URL once at module level for use in every request.
-const DEFAULT_API_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
 /**
  * usePrinterControls
@@ -17,7 +15,7 @@ const DEFAULT_API_URL = process.env.REACT_APP_API_URL || "http://localhost:8000"
  * @param {string} [backendApiUrl] - Override the default API base URL.
  * @returns {object} Printer state values and command handler functions.
  */
-const usePrinterControls = (backendApiUrl = DEFAULT_API_URL) => {
+const usePrinterControls = (backendApiUrl = BACKEND_BASE_URL) => {
   // Reads the shared printer-status stream so multiple components stay in sync.
   const {
     printerPosition,

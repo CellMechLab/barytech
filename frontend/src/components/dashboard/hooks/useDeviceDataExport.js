@@ -1,8 +1,6 @@
 // Provides a single download handler for exporting raw device data as an HDF5 file.
 // Isolates the export fetch logic from the Dashboard layout component.
-
-// Reads the backend base URL once at module level for use in the export request.
-const DEFAULT_API_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
+import { BACKEND_BASE_URL } from "../../../config/endpoints";
 
 /**
  * useDeviceDataExport
@@ -13,7 +11,7 @@ const DEFAULT_API_URL = process.env.REACT_APP_API_URL || "http://localhost:8000"
  * @param {string} [backendApiUrl] - Override the default API base URL.
  * @returns {{ downloadDeviceData: Function }}
  */
-const useDeviceDataExport = (backendApiUrl = DEFAULT_API_URL) => {
+const useDeviceDataExport = (backendApiUrl = BACKEND_BASE_URL) => {
   // Initiates a GET request to the export endpoint and streams the response as a file download.
   const downloadDeviceData = async () => {
     try {

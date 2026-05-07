@@ -32,11 +32,11 @@ import LinkIcon from "@mui/icons-material/Link";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import FileUploadIcon from "@mui/icons-material/FileUpload";
-import { VIDEO_BASE_URL } from "../../config/endpoints";
+import { BACKEND_BASE_URL, VIDEO_BASE_URL } from "../../config/endpoints";
 
 const Dashboard = () => {
-  // Stores backend base URL used for printer and export API calls.
-  const backendApiUrl = process.env.REACT_APP_API_URL || "http://localhost:8000";
+  // Stores backend base URL used for printer and export API calls (same env chain as login/token).
+  const backendApiUrl = BACKEND_BASE_URL;
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
   const [totalDataPoints, setTotalDataPoints] = useState(0);

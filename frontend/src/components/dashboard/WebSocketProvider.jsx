@@ -13,9 +13,6 @@ export const WebSocketContext = createContext(null);
 export const WebSocketProvider = ({ children }) => {
   const { user } = useUser(); // Get the login function from UserContext
 
-  // Stores the backend base URL used to build the printer status WebSocket endpoint.
-  const backendApiUrl = process.env.REACT_APP_API_URL || "http://localhost:8000";
-
   const [socket, setSocket] = useState(null);
   const [dataBuffer, setDataBuffer] = useState([]); // State to hold received data
   const [dataBuffer1, setDataBuffer1] = useState([]); // State to hold received data
@@ -46,9 +43,8 @@ export const WebSocketProvider = ({ children }) => {
       return undefined;
     }
 
-    // Converts the configured backend HTTP URL into the printer-status WebSocket endpoint.
-    const printerStatusSocketUrl =
-      backendApiUrl.replace(/^http/, "ws") + "/ws/printer";
+    // Printer-status stream uses the same backend host as HTTP (REACT_APP_BACKEND_URL / API_URL).
+    const printerStatusSocketUrl = buildWebSocketUrl("/ws/printer");
 
     // Keeps track of whether cleanup requested that reconnect attempts stop.
     let shouldReconnect = true;
@@ -124,7 +120,7 @@ export const WebSocketProvider = ({ children }) => {
       setPrinterSocketConnected(false);
       printerSocket?.close();
     };
-  }, [backendApiUrl, user]);
+  }, [user]);
 
   const connectWebSocket = () => {
     const newSocket = new WebSocket(buildWebSocketUrl("/ws"));
