@@ -65,31 +65,26 @@ const Controls = ({ type }) => {
 
   const isConnectionButton = type === "connection";
   const buttonStyles = {
-    width: "80px", // Default width
-    height: "80px", // Default height
+    width: "clamp(56px, 8vw, 80px)",
+    height: "clamp(56px, 8vw, 80px)",
     borderRadius: "15%",
     backgroundColor: isConnectionButton
-    ? connected
-      ? "#3da58a" // Connected true
-      : "#9ccbb3" // Connected false
-    : saveEnabled
-      ? "#3da58a" // SaveEnabled true
-      : "#9ccbb3", // SaveEnabled false
-  
-  "&:hover": {
-    backgroundColor: isConnectionButton
       ? connected
-        ? "#358c73" // Hover: Connected true
-        : "#388e3c" // Hover: Connected false
+        ? "#3da58a"
+        : "#9ccbb3"
       : saveEnabled
-        ? "#358c73" // Hover: SaveEnabled true
-        : "#388e3c", // Hover: SaveEnabled false
-  },
-  "@media (max-width: 800px)": {
-    width: "300px",
-    height: "100px",
-  },
-  }  
+        ? "#3da58a"
+        : "#9ccbb3",
+    "&:hover": {
+      backgroundColor: isConnectionButton
+        ? connected
+          ? "#358c73"
+          : "#388e3c"
+        : saveEnabled
+          ? "#358c73"
+          : "#388e3c",
+    },
+  }
 
   return (
     <div className="controls">
@@ -106,9 +101,9 @@ const Controls = ({ type }) => {
         sx={buttonStyles}
       >
         {isConnectionButton ? (
-          <PowerSettingsNewIcon sx={{ fontSize: 50, color: "white" }} />
+          <PowerSettingsNewIcon sx={{ fontSize: "clamp(28px, 4vw, 50px)", color: "white" }} />
         ) : (
-          <SaveAlt sx={{ fontSize: 50, color: "white" }} />
+          <SaveAlt sx={{ fontSize: "clamp(28px, 4vw, 50px)", color: "white" }} />
         )}
       </IconButton>
     </div>

@@ -2,7 +2,9 @@
 fastapi==0.135.1
 uvicorn[standard]==0.41.0
 sqlalchemy==2.0.48
+greenlet==3.2.4
 asyncpg==0.31.0
+aiosqlite==0.21.0
 alembic==1.18.4
 websockets==15.0.1
 strawberry-graphql==0.284.1
@@ -10,9 +12,9 @@ strawberry-graphql==0.284.1
 # Data processing
 orjson==3.11.7
 python-multipart==0.0.22
-pandas==2.3.3
+pandas==2.2.3
 h5py==3.15.1
-numpy==2.4.3
+numpy==2.2.6
 
 # Authentication
 passlib[bcrypt]==1.7.4
