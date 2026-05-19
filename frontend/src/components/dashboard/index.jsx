@@ -14,7 +14,7 @@ import LineChart from "./LineChart";
 import StatBox from "./StatBox";
 import ControlButton from "./ControlButton";
 import { useState, useCallback, useRef, useContext, useEffect } from "react";
-import DraggableBox from "./DraggableBox"; // Import DraggableBox component
+import DraggableBox from "./DraggableBox";
 import { WebSocketContext } from "./WebSocketProvider";
 import usePrinterControls from "./hooks/usePrinterControls";
 import useDeviceDataExport from "./hooks/useDeviceDataExport";
@@ -35,7 +35,6 @@ import FileUploadIcon from "@mui/icons-material/FileUpload";
 import { BACKEND_BASE_URL, VIDEO_BASE_URL } from "../../config/endpoints";
 
 const Dashboard = () => {
-  // Stores backend base URL used for printer and export API calls (same env chain as login/token).
   const backendApiUrl = BACKEND_BASE_URL;
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
@@ -43,7 +42,6 @@ const Dashboard = () => {
   const { dataBuffer } = useContext(WebSocketContext);
   const [saveEnabled, setSaveEnabled] = useState(false);
 
-  // Printer state and command handlers — all fetch/WS logic lives in the hook.
   const {
     printerActionInProgress,
     printerActionStatus,
@@ -62,28 +60,35 @@ const Dashboard = () => {
     handleDisconnectPrinter,
   } = usePrinterControls(backendApiUrl);
 
-  // Export handler — fetch/download logic lives in the hook.
   const { downloadDeviceData } = useDeviceDataExport(backendApiUrl);
 
   const handleDataPointCountChange = (count) => {
     setTotalDataPoints(count);
   };
-  const isSmallScreen = useMediaQuery("(max-width:800px)");
-  // Detects very narrow mobile widths so button grids can stack without clipping labels.
+
+  // ─── Breakpoints ───────────────────────────────────────────────────────────
+  // Covers anything ≤ 520 px (phones like iPhone SE, small Androids).
   const isExtraSmallScreen = useMediaQuery("(max-width:520px)");
+  // NEW — specifically targets 5-inch portrait devices (e.g. 720 × 1280).
+  // Sits between isExtraSmallScreen and isMediumScreen so it gets its own
+  // sizing values instead of accidentally inheriting the full-desktop "20px" fallback.
+  const isFiveInch = useMediaQuery("(max-width:720px)");
+  // General "phone or small tablet" umbrella used for stacking layout decisions.
+  const isSmallScreen = useMediaQuery("(max-width:800px)");
   const isMediumScreen = useMediaQuery(
     "(min-width:800px) and (max-width:1024px)"
   );
   const isLargeScreen = useMediaQuery(
     "(min-width:1025px) and (max-width:1440px)"
   );
-  // Detects compact 7-inch landscape displays so the dashboard can use tighter spacing.
+  // 7-inch landscape panels (e.g. 1024 × 600).
   const isSevenInchDisplay = useMediaQuery(
     "(max-width:1024px) and (max-height:700px)"
   );
-  // Dynamically adjust font sizes for title
+
+  // ─── Typography ────────────────────────────────────────────────────────────
   const titleFontSize = isSmallScreen
-    ? "14px"
+    ? "13px"
     : isSevenInchDisplay
     ? "15px"
     : isMediumScreen
@@ -93,7 +98,7 @@ const Dashboard = () => {
     : "20px";
 
   const subtitleFontSize = isSmallScreen
-    ? "15px"
+    ? "12px"
     : isSevenInchDisplay
     ? "14px"
     : isMediumScreen
@@ -101,26 +106,38 @@ const Dashboard = () => {
     : isLargeScreen
     ? "15px"
     : "22px";
-  // Hides the dashboard header on compact panels to preserve vertical room for controls.
+
+  // ─── Layout helpers ────────────────────────────────────────────────────────
   const showDashboardHeader = !isSmallScreen && !isSevenInchDisplay;
-  // Shrinks outer padding on compact panels so cards use more of the screen.
+
+  // FIX: previously jumped from isExtraSmallScreen (≤520) straight to "20px",
+  // leaving 5-inch (720 px) devices with full desktop margins.
   const dashboardOuterMargin = isExtraSmallScreen
-    ? "8px"
+    ? "6px"
+    : isFiveInch
+    ? "10px"
     : isSevenInchDisplay
     ? "10px"
     : "20px";
-  // Reduces the grid gap on compact panels to fit more content above the fold.
+
+  // FIX: same issue with gap — 5-inch was getting the 20 px desktop gap.
   const dashboardGridGap = isExtraSmallScreen
+    ? "6px"
+    : isFiveInch
     ? "8px"
     : isSevenInchDisplay
     ? "12px"
     : "20px";
-  // Lowers row height on compact panels so large cards do not extend too far vertically.
+
+  // FIX: tighter rows for 5-inch portrait so content doesn't over-expand vertically.
   const dashboardGridAutoRows = isSevenInchDisplay
     ? "minmax(118px, auto)"
+    : isFiveInch
+    ? "minmax(82px, auto)"
     : isSmallScreen
-    ? "minmax(110px, auto)"
+    ? "minmax(100px, auto)"
     : "minmax(140px, auto)";
+
   const [transformedData, setTransformedData] = useState({
     series1: [],
     series2: [],
@@ -128,12 +145,9 @@ const Dashboard = () => {
   const [series1Data, setSeries1Data] = useState([]);
   const [series2Data, setSeries2Data] = useState([]);
 
-
   useEffect(() => {
-    // console.log("dataBuffer1");
     if (chartRef.current) {
       const data = chartRef.current.transformData(dataBuffer);
-      // console.log("transformeddata", data);
       setTransformedData(data);
     }
   }, [dataBuffer]);
@@ -159,70 +173,48 @@ const Dashboard = () => {
   const chartRef = useRef();
   const handleDownload = () => {
     if (chartRef.current) {
-      chartRef.current.downloadChart(); // Call the downloadChart method
+      chartRef.current.downloadChart();
     }
   };
 
   const setChartRef = useCallback((ref) => {
     chartRef.current = ref;
   }, []);
+
   const handleDrop = (fromId, toId) => {
     const newBoxes = [...boxes];
     const fromBox = newBoxes.find((box) => box.id === fromId);
     const toBox = newBoxes.find((box) => box.id === toId);
-
     if (!fromBox || !toBox) return;
-
-    // Swap gridColumn and gridRow between fromBox and toBox
-    [fromBox.gridColumn, toBox.gridColumn] = [
-      toBox.gridColumn,
-      fromBox.gridColumn,
-    ];
+    [fromBox.gridColumn, toBox.gridColumn] = [toBox.gridColumn, fromBox.gridColumn];
     [fromBox.gridRow, toBox.gridRow] = [toBox.gridRow, fromBox.gridRow];
-
     setBoxes(newBoxes);
   };
-  const handleHover = (fromId, toId) => {
-    // Create a copy of the boxes array
-    const newBoxes = [...boxes];
 
-    // Find the indices of the dragged and target items
+  const handleHover = (fromId, toId) => {
+    const newBoxes = [...boxes];
     const fromIndex = newBoxes.findIndex((box) => box.id === fromId);
     const toIndex = newBoxes.findIndex((box) => box.id === toId);
-
     if (fromIndex === -1 || toIndex === -1) return;
-
-    // Swap the positions in the array without changing box sizes
-    [newBoxes[fromIndex], newBoxes[toIndex]] = [
-      newBoxes[toIndex],
-      newBoxes[fromIndex],
-    ];
-
-    // Update state with the reordered boxes
+    [newBoxes[fromIndex], newBoxes[toIndex]] = [newBoxes[toIndex], newBoxes[fromIndex]];
     setBoxes(newBoxes);
   };
 
   const handleDelete = (id) => {
-    console.log(boxes[id]);
     setBoxes((prevBoxes) => prevBoxes.filter((box) => box.id !== id));
   };
 
   const [boxes, setBoxes] = useState([
     {
       id: 9,
-      // Uses extra width on desktop because this card now includes controls + status.
       gridColumn: "span 8",
-      // Reduced to span 2 (~75% of previous span 3 height) to keep the card compact.
       gridRow: "span 2",
-      // Content is overridden every render in updatedBoxes to keep state fresh.
       content: null,
     },
     {
       id: 10,
       gridColumn: "span 4",
-      // Keeps first-row box heights consistent with other first-row cards.
       gridRow: "span 2",
-      // Content is overridden every render in updatedBoxes to keep state fresh.
       content: null,
     },
     {
@@ -232,8 +224,8 @@ const Dashboard = () => {
       content: (
         <Box width="100%" height="100%" display="flex" flexDirection="column" sx={{ minHeight: 0, overflow: "hidden" }}>
           <Box
-            mt={isExtraSmallScreen ? "8px" : isSmallScreen ? "10px" : "18px"}
-            px={isExtraSmallScreen ? "10px" : isSmallScreen ? "14px" : "24px"}
+            mt={isExtraSmallScreen ? "6px" : isFiveInch ? "8px" : isSmallScreen ? "10px" : "18px"}
+            px={isExtraSmallScreen ? "8px" : isFiveInch ? "10px" : isSmallScreen ? "14px" : "24px"}
             display="flex"
             justifyContent="space-between"
             alignItems="center"
@@ -242,20 +234,15 @@ const Dashboard = () => {
             <Box>
               <Typography
                 fontWeight="bold"
-                sx={{ color: colors.grey[100], fontSize: "clamp(13px, 1.4vw, 20px)" }}
+                sx={{ color: colors.grey[100], fontSize: "clamp(12px, 1.4vw, 20px)" }}
               >
                 Force vs Time
-              </Typography>
-              <Typography
-                sx={{ fontSize: "clamp(12px, 1.2vw, 18px)", color: colors.greenAccent[500] }}
-              >
-                {/* number */}
               </Typography>
             </Box>
             <Box>
               <IconButton onClick={handleDownload}>
                 <DownloadOutlinedIcon
-                  sx={{ fontSize: "clamp(18px, 2vw, 26px)", color: colors.greenAccent[500] }}
+                  sx={{ fontSize: "clamp(16px, 2vw, 26px)", color: colors.greenAccent[500] }}
                 />
               </IconButton>
             </Box>
@@ -273,8 +260,8 @@ const Dashboard = () => {
       content: (
         <Box width="100%" height="100%" display="flex" flexDirection="column" sx={{ minHeight: 0, overflow: "hidden" }}>
           <Box
-            mt={isExtraSmallScreen ? "8px" : isSmallScreen ? "10px" : "18px"}
-            px={isExtraSmallScreen ? "10px" : isSmallScreen ? "14px" : "24px"}
+            mt={isExtraSmallScreen ? "6px" : isFiveInch ? "8px" : isSmallScreen ? "10px" : "18px"}
+            px={isExtraSmallScreen ? "8px" : isFiveInch ? "10px" : isSmallScreen ? "14px" : "24px"}
             display="flex"
             justifyContent="space-between"
             alignItems="center"
@@ -283,20 +270,15 @@ const Dashboard = () => {
             <Box>
               <Typography
                 fontWeight="bold"
-                sx={{ color: colors.grey[100], fontSize: "clamp(13px, 1.4vw, 20px)" }}
+                sx={{ color: colors.grey[100], fontSize: "clamp(12px, 1.4vw, 20px)" }}
               >
                 Z vs Time
-              </Typography>
-              <Typography
-                sx={{ fontSize: "clamp(12px, 1.2vw, 18px)", color: colors.greenAccent[500] }}
-              >
-                {/* number */}
               </Typography>
             </Box>
             <Box>
               <IconButton onClick={handleDownload}>
                 <DownloadOutlinedIcon
-                  sx={{ fontSize: "clamp(18px, 2vw, 26px)", color: colors.greenAccent[500] }}
+                  sx={{ fontSize: "clamp(16px, 2vw, 26px)", color: colors.greenAccent[500] }}
                 />
               </IconButton>
             </Box>
@@ -331,8 +313,7 @@ const Dashboard = () => {
         <StatBox
           measurementColor="#006666"
           title="Displacement Last Value"
-          subtitle={`${transformedData.series1?.[0]?.value || "-"} 
-      cm`}
+          subtitle={`${transformedData.series1?.[0]?.value || "-"} cm`}
         />
       ),
       gridColumn: "span 2",
@@ -347,32 +328,39 @@ const Dashboard = () => {
         <StatBox
           measurementColor="#D35400"
           title="Force Last Value"
-          subtitle={`${transformedData.series1?.[0]?.value || "-"} 
-      N`}
+          subtitle={`${transformedData.series1?.[0]?.value || "-"} N`}
         />
       ),
       gridColumn: "span 2",
       gridRow: "span 1",
       lineColor: "#FF9800",
-      areaColor: " rgba(255,152,0,0.2)",
+      areaColor: "rgba(255,152,0,0.2)",
       data: transformedData.series1 || [],
     },
   ]);
+
   const updatedBoxes = boxes.map((box) => {
     if (box.id === 10) {
-      // Keeps jog control button dimensions unchanged after moving controls.
+      // ── Jog control sizing ─────────────────────────────────────────────────
+      // 5-inch (720 px): 40 px gives a comfortable touch target without clipping.
       const cameraJogControlSize = isExtraSmallScreen
-        ? 36
+        ? 34
+        : isFiveInch
+        ? 40
         : isSmallScreen
         ? 42
         : isSevenInchDisplay
         ? 44
         : 52;
 
-      // Keeps icon dimensions unchanged for camera card jog controls.
-      const cameraJogIconSize = isExtraSmallScreen ? 18 : isSmallScreen ? 20 : 24;
+      const cameraJogIconSize = isExtraSmallScreen
+        ? 16
+        : isFiveInch
+        ? 18
+        : isSmallScreen
+        ? 20
+        : 24;
 
-      // Shared style for directional jog icon buttons in camera card.
       const cameraJogBtnStyle = {
         backgroundColor: colors.greenAccent[700],
         borderRadius: "6px",
@@ -384,20 +372,28 @@ const Dashboard = () => {
         "&:disabled": { opacity: 0.35 },
       };
 
-      // Jog step button style in camera card — highlighted when active.
       const cameraStepBtnStyle = (step) => ({
-        minWidth: isExtraSmallScreen ? "44px" : "52px",
-        fontSize: isExtraSmallScreen ? "12px" : "14px",
-        padding: isExtraSmallScreen ? "4px 8px" : "6px 10px",
+        minWidth: isExtraSmallScreen ? "38px" : isFiveInch ? "42px" : "52px",
+        fontSize: isExtraSmallScreen ? "11px" : isFiveInch ? "12px" : "14px",
+        padding: isExtraSmallScreen ? "3px 6px" : isFiveInch ? "4px 8px" : "6px 10px",
         backgroundColor: jogStep === step ? colors.greenAccent[700] : "transparent",
         color: colors.grey[100],
         border: `1px solid ${colors.greenAccent[500]}`,
         "&:hover": { backgroundColor: colors.greenAccent[600] },
       });
+
       return {
         ...box,
         content: (
-          <Box width="100%" p={isExtraSmallScreen ? "8px" : "12px"} height="100%" display="flex" flexDirection="column" gap="8px" sx={{ overflow: "hidden", boxSizing: "border-box" }}>
+          <Box
+            width="100%"
+            p={isExtraSmallScreen ? "6px" : isFiveInch ? "10px" : "12px"}
+            height="100%"
+            display="flex"
+            flexDirection="column"
+            gap={isFiveInch ? "6px" : "8px"}
+            sx={{ overflow: "hidden", boxSizing: "border-box" }}
+          >
             <Typography
               fontWeight="bold"
               sx={{ color: colors.grey[100] }}
@@ -405,44 +401,49 @@ const Dashboard = () => {
             >
               Camera View
             </Typography>
-            {/* Always splits the camera card vertically: left = controls, right = live feed. */}
+
             <Box
               display="flex"
               flexDirection={isSmallScreen ? "column" : "row"}
-              gap={isSmallScreen ? "10px" : "0px"}
+              gap={isSmallScreen ? "8px" : "0px"}
               flexGrow={1}
               minHeight={0}
               sx={{ overflow: "hidden" }}
             >
-              {/* Left column: step selector and XY/Z jog pads. */}
+              {/* Left column: step selector + jog pads */}
               <Box
                 display="flex"
                 flexDirection="column"
-                gap="8px"
+                gap="6px"
                 sx={{
                   flex: isSmallScreen ? "1 1 auto" : "0 0 42%",
                   minWidth: 0,
                   overflow: "hidden",
-                  pr: "10px",
+                  pr: isSmallScreen ? "0" : "10px",
                 }}
               >
-                {/* Step size selector buttons */}
-                <Box display="flex" alignItems="center" gap="6px" flexWrap="wrap">
-                  <Typography fontSize="12px" sx={{ color: colors.grey[400] }}>Step:</Typography>
+                {/* Step size selector */}
+                <Box display="flex" alignItems="center" gap="4px" flexWrap="wrap">
+                  <Typography fontSize="11px" sx={{ color: colors.grey[400] }}>Step:</Typography>
                   {[0.1, 1, 10].map((step) => (
                     <Button key={step} size="small" sx={cameraStepBtnStyle(step)} onClick={() => setJogStep(step)}>
                       {step}
                     </Button>
                   ))}
-                  <Typography fontSize="12px" sx={{ color: colors.grey[400] }}>mm</Typography>
+                  <Typography fontSize="11px" sx={{ color: colors.grey[400] }}>mm</Typography>
                 </Box>
 
-                {/* XY and Z jog pads aligned side by side */}
+                {/* XY + Z jog pads */}
                 <Box display="flex" gap="8px" alignItems="flex-start" flexWrap="wrap">
-                  {/* Head XY jog pad */}
+                  {/* Head XY */}
                   <Box display="flex" flexDirection="column" alignItems="center" gap="4px">
-                    <Typography fontSize="11px" sx={{ color: colors.grey[400] }}>Head XY</Typography>
-                    <Box display="grid" gridTemplateColumns={`repeat(3, ${cameraJogControlSize}px)`} gridTemplateRows={`repeat(3, ${cameraJogControlSize}px)`} gap="4px">
+                    <Typography fontSize="10px" sx={{ color: colors.grey[400] }}>Head XY</Typography>
+                    <Box
+                      display="grid"
+                      gridTemplateColumns={`repeat(3, ${cameraJogControlSize}px)`}
+                      gridTemplateRows={`repeat(3, ${cameraJogControlSize}px)`}
+                      gap="3px"
+                    >
                       <Box />
                       <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Y", 1)} sx={cameraJogBtnStyle}>
                         <ArrowUpwardIcon sx={{ fontSize: cameraJogIconSize }} />
@@ -452,7 +453,7 @@ const Dashboard = () => {
                         <ArrowBackIcon sx={{ fontSize: cameraJogIconSize }} />
                       </IconButton>
                       <Box display="flex" alignItems="center" justifyContent="center" sx={{ backgroundColor: colors.primary[400], borderRadius: "6px" }}>
-                        <Typography fontSize="11px" sx={{ color: colors.grey[400] }}>XY</Typography>
+                        <Typography fontSize="10px" sx={{ color: colors.grey[400] }}>XY</Typography>
                       </Box>
                       <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("X", 1)} sx={cameraJogBtnStyle}>
                         <ArrowForwardIcon sx={{ fontSize: cameraJogIconSize }} />
@@ -465,15 +466,15 @@ const Dashboard = () => {
                     </Box>
                   </Box>
 
-                  {/* Bed Z jog pad */}
+                  {/* Bed Z */}
                   <Box display="flex" flexDirection="column" alignItems="center" gap="4px">
-                    <Typography fontSize="11px" sx={{ color: colors.grey[400] }}>Bed Z</Typography>
-                    <Box display="flex" flexDirection="column" alignItems="center" gap="4px">
+                    <Typography fontSize="10px" sx={{ color: colors.grey[400] }}>Bed Z</Typography>
+                    <Box display="flex" flexDirection="column" alignItems="center" gap="3px">
                       <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Z", -1)} sx={cameraJogBtnStyle}>
                         <ArrowUpwardIcon sx={{ fontSize: cameraJogIconSize }} />
                       </IconButton>
                       <Box display="flex" alignItems="center" justifyContent="center" sx={{ width: cameraJogControlSize, height: cameraJogControlSize, backgroundColor: colors.primary[400], borderRadius: "6px" }}>
-                        <Typography fontSize="11px" sx={{ color: colors.grey[400] }}>Z</Typography>
+                        <Typography fontSize="10px" sx={{ color: colors.grey[400] }}>Z</Typography>
                       </Box>
                       <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Z", 1)} sx={cameraJogBtnStyle}>
                         <ArrowDownwardIcon sx={{ fontSize: cameraJogIconSize }} />
@@ -483,7 +484,7 @@ const Dashboard = () => {
                 </Box>
               </Box>
 
-              {/* Vertical divider between the controls column and the camera feed. */}
+              {/* Divider */}
               <Box
                 sx={{
                   width: isSmallScreen ? "100%" : "2px",
@@ -495,22 +496,18 @@ const Dashboard = () => {
                 }}
               />
 
-              {/* Right column: live camera feed fills the remaining space. */}
+              {/* Right column: live camera feed */}
               <Box
                 display="flex"
                 flexDirection="column"
-                gap="6px"
+                gap="4px"
                 sx={{
                   flex: "1 1 0",
                   minWidth: 0,
-                  pl: "10px",
                   pl: isSmallScreen ? "0px" : "10px",
                 }}
               >
-                <Typography fontSize="12px" sx={{ color: colors.grey[400] }}>
-                  Live feed
-                </Typography>
-                {/* Width 100% ensures the feed container spans the full right-column width. */}
+                <Typography fontSize="11px" sx={{ color: colors.grey[400] }}>Live feed</Typography>
                 <Box flexGrow={1} minHeight={0} display="flex" alignItems="center" justifyContent="center" width="100%">
                   <img
                     src={`${VIDEO_BASE_URL}/video`}
@@ -524,64 +521,61 @@ const Dashboard = () => {
         ),
       };
     } else if (box.id === 9) {
-      // Shared style for utility action buttons (Home, Connect, Disconnect).
+      // ── Printer controls button styles ─────────────────────────────────────
       const utilBtnStyle = {
-        fontSize: isExtraSmallScreen ? "12px" : "13px",
-        padding: isExtraSmallScreen ? "8px 10px" : "10px 12px",
+        fontSize: isExtraSmallScreen ? "11px" : isFiveInch ? "12px" : "13px",
+        padding: isExtraSmallScreen ? "6px 8px" : isFiveInch ? "8px 10px" : "10px 12px",
         color: colors.grey[100],
         border: `1px solid ${colors.greenAccent[500]}`,
         backgroundColor: colors.greenAccent[800] ?? colors.greenAccent[700],
         "&:hover": { backgroundColor: colors.greenAccent[600] },
         "&:disabled": { opacity: 0.35 },
         minWidth: 0,
-        minHeight: 56,
+        // FIX: reduce tap-target height on 5-inch; 48px still meets accessibility minimums.
+        minHeight: isExtraSmallScreen ? 44 : isFiveInch ? 48 : 56,
       };
 
-      // Style for the emergency stop button — prominent red to signal danger.
       const eStopBtnStyle = {
-        fontSize: isExtraSmallScreen ? "12px" : "13px",
-        padding: isExtraSmallScreen ? "8px 10px" : "10px 12px",
+        fontSize: isExtraSmallScreen ? "11px" : isFiveInch ? "12px" : "13px",
+        padding: isExtraSmallScreen ? "6px 8px" : isFiveInch ? "8px 10px" : "10px 12px",
         color: "#fff",
         border: "1px solid #c62828",
         backgroundColor: "#c62828",
         "&:hover": { backgroundColor: "#b71c1c" },
         minWidth: 0,
-        minHeight: 56,
+        minHeight: isExtraSmallScreen ? 44 : isFiveInch ? 48 : 56,
       };
 
-      // Style for the connect button so connection state is visible in the merged card.
       const connectBtnStyle = {
-        fontSize: isExtraSmallScreen ? "12px" : "13px",
-        padding: isExtraSmallScreen ? "8px 10px" : "10px 12px",
+        fontSize: isExtraSmallScreen ? "11px" : isFiveInch ? "12px" : "13px",
+        padding: isExtraSmallScreen ? "6px 8px" : isFiveInch ? "8px 10px" : "10px 12px",
         color: colors.grey[100],
         border: `1px solid ${colors.greenAccent[500]}`,
         backgroundColor: printerConnected ? colors.greenAccent[700] : "transparent",
         "&:hover": { backgroundColor: colors.greenAccent[600] },
         "&:disabled": { opacity: 0.35 },
         minWidth: 0,
-        minHeight: 56,
+        minHeight: isExtraSmallScreen ? 44 : isFiveInch ? 48 : 56,
       };
 
-      // Style for the disconnect button so users can quickly close the printer port.
       const disconnectBtnStyle = {
-        fontSize: isExtraSmallScreen ? "12px" : "13px",
-        padding: isExtraSmallScreen ? "8px 10px" : "10px 12px",
+        fontSize: isExtraSmallScreen ? "11px" : isFiveInch ? "12px" : "13px",
+        padding: isExtraSmallScreen ? "6px 8px" : isFiveInch ? "8px 10px" : "10px 12px",
         color: colors.grey[100],
         border: "1px solid #c62828",
         backgroundColor: "transparent",
         "&:hover": { backgroundColor: "#c62828" },
         "&:disabled": { opacity: 0.35 },
         minWidth: 0,
-        minHeight: 56,
+        minHeight: isExtraSmallScreen ? 44 : isFiveInch ? 48 : 56,
       };
 
-      // Shared full-width button sizing keeps the three top actions aligned in one row.
+      // FIX: reduce minHeight — at 720 px the 64 px button rows were wasting vertical space.
       const printerActionButtonStyle = {
         width: "100%",
-        minHeight: isExtraSmallScreen ? 52 : 64,
+        minHeight: isExtraSmallScreen ? 44 : isFiveInch ? 48 : isSmallScreen ? 52 : 64,
       };
 
-      // Shared panel styling keeps the controls and live status blocks visually balanced.
       const printerPanelSectionStyle = {
         backgroundColor: colors.primary[400],
         borderRadius: "8px",
@@ -589,68 +583,68 @@ const Dashboard = () => {
         boxSizing: "border-box",
       };
 
-      // Shared status card styling makes each status tile stretch to evenly fill the column.
       const printerStatusCardStyle = {
         ...printerPanelSectionStyle,
         display: "flex",
         flexDirection: "column",
         justifyContent: "center",
         flex: 1,
-        p: "10px 12px",
+        p: isFiveInch ? "8px 10px" : "10px 12px",
       };
 
       return {
         ...box,
         content: (
-          // Fills the full draggable card area and allows content to scale cleanly.
           <Box
-            p="12px"
+            p={isFiveInch ? "10px" : "12px"}
             display="flex"
             flexDirection="column"
-            gap="8px"
+            gap={isFiveInch ? "6px" : "8px"}
             height="100%"
             width="100%"
             minHeight={0}
             sx={{ overflow: "hidden", boxSizing: "border-box" }}
           >
-            {/* Section title */}
             <Typography fontWeight="bold" sx={{ color: colors.grey[100] }} fontSize={titleFontSize}>
               Printer Controls & Status
             </Typography>
 
-            {/* Splits card content into control panel (left) and status panel (right). */}
             <Box
               display="flex"
               flexDirection={isSmallScreen ? "column" : "row"}
-              gap="12px"
+              gap={isFiveInch ? "8px" : "12px"}
               flexGrow={1}
               minHeight={0}
             >
-              {/* Left section: all command controls and jog actions. */}
+              {/* Left section: command controls */}
               <Box
                 display="flex"
                 flexDirection="column"
-                gap="10px"
+                gap={isFiveInch ? "6px" : "10px"}
                 minHeight={0}
                 sx={{
                   ...printerPanelSectionStyle,
                   flex: isSmallScreen ? "1 1 auto" : "0 0 58%",
                   overflow: "hidden",
-                  p: "10px",
+                  p: isFiveInch ? "8px" : "10px",
                 }}
               >
-                {/* Quick-action row keeps connect, home, and E-stop aligned in a single row. */}
+                {/* Quick-action row: Connect / Home / E-STOP
+                    FIX — on 5-inch (720 px) we can fit all three in one row (3 columns)
+                    instead of forcing a 2-column grid that wastes a row. */}
                 <Box
                   display="grid"
                   gridTemplateColumns={
                     isExtraSmallScreen
                       ? "repeat(1, minmax(0, 1fr))"
+                      : isFiveInch
+                      ? "repeat(3, minmax(0, 1fr))"
                       : isSmallScreen
                       ? "repeat(2, minmax(0, 1fr))"
                       : "repeat(3, minmax(0, 1fr))"
                   }
-                  gridAutoRows={`minmax(${isExtraSmallScreen ? 52 : 64}px, auto)`}
-                  gap="10px"
+                  gridAutoRows={`minmax(${isExtraSmallScreen ? 44 : isFiveInch ? 48 : 52}px, auto)`}
+                  gap={isFiveInch ? "6px" : "10px"}
                   flexGrow={1}
                   minHeight={0}
                 >
@@ -659,8 +653,8 @@ const Dashboard = () => {
                     onClick={printerConnected ? handleDisconnectPrinter : handleConnectPrinter}
                     startIcon={
                       printerConnected
-                        ? <LinkOffIcon sx={{ fontSize: 14 }} />
-                        : <LinkIcon sx={{ fontSize: 14 }} />
+                        ? <LinkOffIcon sx={{ fontSize: 13 }} />
+                        : <LinkIcon sx={{ fontSize: 13 }} />
                     }
                     sx={{
                       ...(printerConnected ? disconnectBtnStyle : connectBtnStyle),
@@ -672,7 +666,7 @@ const Dashboard = () => {
                   <Button
                     disabled={printerActionInProgress}
                     onClick={handleHomePrinter}
-                    startIcon={<HomeIcon sx={{ fontSize: 16 }} />}
+                    startIcon={<HomeIcon sx={{ fontSize: 14 }} />}
                     sx={{ ...utilBtnStyle, ...printerActionButtonStyle }}
                   >
                     Home All
@@ -680,7 +674,7 @@ const Dashboard = () => {
                   <Button
                     disabled={printerActionInProgress}
                     onClick={handleEmergencyStop}
-                    startIcon={<StopIcon sx={{ fontSize: 16 }} />}
+                    startIcon={<StopIcon sx={{ fontSize: 14 }} />}
                     sx={{ ...eStopBtnStyle, ...printerActionButtonStyle }}
                   >
                     E-STOP
@@ -688,7 +682,7 @@ const Dashboard = () => {
                 </Box>
               </Box>
 
-              {/* Vertical separator between printer controls and status values. */}
+              {/* Vertical separator */}
               <Box
                 sx={{
                   width: isSmallScreen ? "100%" : "2px",
@@ -699,51 +693,51 @@ const Dashboard = () => {
                 }}
               />
 
-              {/* Right section: Cmd + Bed Status on the same top row, Position spanning full width below. */}
+              {/* Right section: status cards */}
               <Box
                 display="flex"
                 flexDirection="column"
-                gap="8px"
+                gap={isFiveInch ? "6px" : "8px"}
                 minHeight={0}
                 sx={{ flex: isSmallScreen ? "1 1 auto" : "0 0 42%" }}
               >
-                {/* Top row: Cmd card (left) and Bed Status card (right) side by side. */}
-                <Box display="flex" flexDirection="row" gap="8px" minHeight={0}>
+                {/* Cmd + Bed Status side by side */}
+                <Box display="flex" flexDirection="row" gap={isFiveInch ? "6px" : "8px"} minHeight={0}>
                   <Box sx={{ ...printerStatusCardStyle, flex: 1, minWidth: 0 }}>
-                    <Box display="flex" alignItems="center" gap="6px">
-                      <MyLocationIcon sx={{ fontSize: 14, color: colors.greenAccent[400] }} />
-                      <Typography fontSize="12px" sx={{ color: colors.grey[300] }}>
-                        Cmd
-                      </Typography>
+                    <Box display="flex" alignItems="center" gap="4px">
+                      <MyLocationIcon sx={{ fontSize: 13, color: colors.greenAccent[400] }} />
+                      <Typography fontSize="11px" sx={{ color: colors.grey[300] }}>Cmd</Typography>
                     </Box>
-                    <Typography fontSize="14px" fontWeight="bold" sx={{ color: colors.greenAccent[400], mt: "4px" }}>
+                    <Typography fontSize={isFiveInch ? "12px" : "14px"} fontWeight="bold" sx={{ color: colors.greenAccent[400], mt: "3px" }}>
                       {printerActionStatus}
                     </Typography>
                   </Box>
 
                   <Box sx={{ ...printerStatusCardStyle, flex: 1, minWidth: 0 }}>
-                    <Box display="flex" alignItems="center" gap="6px">
-                      <ThermostatIcon sx={{ fontSize: 14, color: colors.redAccent[400] }} />
-                      <Typography fontSize="12px" sx={{ color: colors.grey[300] }}>
-                        Bed Status
-                      </Typography>
+                    <Box display="flex" alignItems="center" gap="4px">
+                      <ThermostatIcon sx={{ fontSize: 13, color: colors.redAccent[400] }} />
+                      <Typography fontSize="11px" sx={{ color: colors.grey[300] }}>Bed Status</Typography>
                     </Box>
-                    <Typography fontSize="14px" fontWeight="bold" sx={{ color: colors.redAccent[300], mt: "4px" }}>
+                    <Typography fontSize={isFiveInch ? "12px" : "14px"} fontWeight="bold" sx={{ color: colors.redAccent[300], mt: "3px" }}>
                       {bedTemperature !== null ? `${bedTemperature.toFixed(1)} °C` : "—"}
                     </Typography>
                   </Box>
                 </Box>
 
-                {/* Bottom row: Position spanning the full status column width. */}
+                {/* Position spanning full width */}
                 <Box sx={printerStatusCardStyle}>
-                  <Box display="flex" alignItems="center" gap="6px">
-                    <MyLocationIcon sx={{ fontSize: 14, color: colors.greenAccent[400] }} />
-                    <Typography fontSize="12px" sx={{ color: colors.grey[300] }}>
-                      Position
-                    </Typography>
+                  <Box display="flex" alignItems="center" gap="4px">
+                    <MyLocationIcon sx={{ fontSize: 13, color: colors.greenAccent[400] }} />
+                    <Typography fontSize="11px" sx={{ color: colors.grey[300] }}>Position</Typography>
                   </Box>
-                  <Typography fontSize="14px" fontWeight="bold" sx={{ color: colors.greenAccent[400], mt: "4px" }}>
-                    X:{printerPosition.x !== null && printerPosition.x !== undefined ? Number(printerPosition.x).toFixed(1) : "—"} / Y:{printerPosition.y !== null && printerPosition.y !== undefined ? Number(printerPosition.y).toFixed(1) : "—"} / Z:{printerPosition.z !== null && printerPosition.z !== undefined ? Number(printerPosition.z).toFixed(1) : "—"}
+                  <Typography
+                    fontSize={isFiveInch ? "11px" : "14px"}
+                    fontWeight="bold"
+                    sx={{ color: colors.greenAccent[400], mt: "3px", wordBreak: "break-all" }}
+                  >
+                    X:{printerPosition.x !== null && printerPosition.x !== undefined ? Number(printerPosition.x).toFixed(1) : "—"}{" "}
+                    Y:{printerPosition.y !== null && printerPosition.y !== undefined ? Number(printerPosition.y).toFixed(1) : "—"}{" "}
+                    Z:{printerPosition.z !== null && printerPosition.z !== undefined ? Number(printerPosition.z).toFixed(1) : "—"}
                   </Typography>
                 </Box>
               </Box>
@@ -763,7 +757,7 @@ const Dashboard = () => {
                 ? series1Data[series1Data.length - 1].value.toFixed(2)
                 : "-"
             } cm`}
-            icon={<SwapHorizIcon style={{ color: "#009688", fontSize: 28 }} />}
+            icon={<SwapHorizIcon style={{ color: "#009688", fontSize: isFiveInch ? 22 : 28 }} />}
           />
         ),
       };
@@ -779,14 +773,12 @@ const Dashboard = () => {
                 ? series2Data[series2Data.length - 1].value.toFixed(2)
                 : "-"
             } cm`}
-            icon={<BoltIcon style={{ color: "#FF9800 ", fontSize: 28 }} />}
+            icon={<BoltIcon style={{ color: "#FF9800", fontSize: isFiveInch ? 22 : 28 }} />}
           />
         ),
       };
     }
 
-    // "Received data / Received points" widget is intentionally disabled and
-    // replaced with printer control actions above.
     return box;
   });
 
@@ -795,47 +787,55 @@ const Dashboard = () => {
     const screenHeight = window.innerHeight;
     const isCompactPanel = screenWidth <= 1024 && screenHeight <= 700;
     const isMobile = screenWidth <= 800;
+    // FIX: dedicated flag for 5-inch portrait (720 × 1280).
+    // Keeps stat boxes in one row and gives content cards enough rows.
+    const isFiveInchLayout = screenWidth <= 720;
     const isExtraSmall = screenWidth <= 520;
 
     setBoxes((prevBoxes) =>
       prevBoxes.map((box) => {
-        // Stat boxes (1,2 = control buttons; 3,4 = stat values)
+        // ── Control buttons (1, 2) and stat boxes (3, 4) ──────────────────────
         if ([1, 2].includes(box.id)) {
           return {
             ...box,
-            gridColumn: isMobile ? "span 6" : isCompactPanel ? "span 3" : "span 2",
+            // FIX: at 720 px use span 3 → all four top widgets fit in one row of 12 columns.
+            gridColumn: isFiveInchLayout ? "span 3" : isMobile ? "span 6" : isCompactPanel ? "span 3" : "span 2",
             gridRow: "span 1",
           };
         }
         if ([3, 4].includes(box.id)) {
           return {
             ...box,
-            gridColumn: isMobile ? "span 6" : isCompactPanel ? "span 3" : "span 2",
-            gridRow: isMobile ? "span 2" : "span 1",
+            gridColumn: isFiveInchLayout ? "span 3" : isMobile ? "span 6" : isCompactPanel ? "span 3" : "span 2",
+            // FIX: keep stat boxes at span 1 on 5-inch so they sit in the same row as buttons.
+            gridRow: isFiveInchLayout ? "span 1" : isMobile ? "span 2" : "span 1",
           };
         }
-        // Charts — always full width; taller row span on mobile so chart isn't squished
+        // ── Charts ────────────────────────────────────────────────────────────
         if (box.id === 7 || box.id === 8) {
           return {
             ...box,
             gridColumn: "span 12",
-            gridRow: isMobile ? "span 4" : isCompactPanel ? "span 3" : "span 3",
+            // FIX: span 4 rows (≈328 px at 82 px base) gives charts a good height on 5-inch.
+            gridRow: isFiveInchLayout ? "span 4" : isMobile ? "span 4" : isCompactPanel ? "span 3" : "span 3",
           };
         }
-        // Printer controls card
+        // ── Printer controls card ──────────────────────────────────────────────
         if (box.id === 9) {
           return {
             ...box,
             gridColumn: isMobile ? "span 12" : isCompactPanel ? "span 12" : "span 8",
-            gridRow: isMobile ? "span 3" : "span 2",
+            // FIX: span 4 (≈328 px) gives enough room for the 3-button row + status cards.
+            gridRow: isFiveInchLayout ? "span 4" : isMobile ? "span 3" : "span 2",
           };
         }
-        // Camera card
+        // ── Camera card ────────────────────────────────────────────────────────
         if (box.id === 10) {
           return {
             ...box,
             gridColumn: isMobile ? "span 12" : isCompactPanel ? "span 12" : "span 4",
-            gridRow: isMobile ? "span 3" : isCompactPanel ? "span 3" : "span 2",
+            // FIX: span 4 keeps camera card proportional with printer card.
+            gridRow: isFiveInchLayout ? "span 4" : isMobile ? "span 3" : isCompactPanel ? "span 3" : "span 2",
           };
         }
         return box;
@@ -844,13 +844,8 @@ const Dashboard = () => {
   };
 
   useEffect(() => {
-    // Initial check
     updateGridColumns();
-
-    // Add event listener for resizing
     window.addEventListener("resize", updateGridColumns);
-
-    // Cleanup the event listener on component unmount
     return () => {
       window.removeEventListener("resize", updateGridColumns);
     };
@@ -858,38 +853,38 @@ const Dashboard = () => {
 
   return (
     <Box m={dashboardOuterMargin}>
-      {/* HEADER */}
-      {showDashboardHeader && (<Box display="flex" justifyContent="space-between" alignItems="center">
-        <Header title="DASHBOARD" subtitle="Welcome to your dashboard" />
-
-        <Box>
-          <Button
-            onClick={downloadDeviceData}
-            sx={{
-              backgroundColor: colors.blueAccent[700],
-              color: colors.grey[100],
-              fontSize: "clamp(11px, 1.2vw, 14px)",
-              fontWeight: "bold",
-              padding: { xs: "8px 12px", sm: "10px 20px" },
-              minWidth: 0,
-            }}
-          >
-            <DownloadOutlinedIcon sx={{ mr: { xs: 0, sm: "10px" } }} />
-            <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
-              Download Reports
-            </Box>
-          </Button>
+      {/* HEADER — hidden on small / compact displays */}
+      {showDashboardHeader && (
+        <Box display="flex" justifyContent="space-between" alignItems="center">
+          <Header title="DASHBOARD" subtitle="Welcome to your dashboard" />
+          <Box>
+            <Button
+              onClick={downloadDeviceData}
+              sx={{
+                backgroundColor: colors.blueAccent[700],
+                color: colors.grey[100],
+                fontSize: "clamp(11px, 1.2vw, 14px)",
+                fontWeight: "bold",
+                padding: { xs: "8px 12px", sm: "10px 20px" },
+                minWidth: 0,
+              }}
+            >
+              <DownloadOutlinedIcon sx={{ mr: { xs: 0, sm: "10px" } }} />
+              <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
+                Download Reports
+              </Box>
+            </Button>
+          </Box>
         </Box>
-      </Box> )}
+      )}
 
-      {/* GRID & CHARTS */}
+      {/* GRID */}
       <Box
         display="grid"
         gridTemplateColumns="repeat(12, 1fr)"
         gridAutoRows={dashboardGridAutoRows}
         gap={dashboardGridGap}
       >
-        {/* Render all boxes as draggable */}
         {updatedBoxes.map((box) => (
           <DraggableBox
             key={box.id}
