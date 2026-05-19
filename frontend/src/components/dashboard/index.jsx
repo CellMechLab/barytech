@@ -193,8 +193,8 @@ const Dashboard = () => {
   const chartHeaderPx = isCompactLandscape ? "10px" : isExtraSmallScreen ? "8px"  : isSmallScreen ? "14px" : "24px";
 
   const [boxes, setBoxes] = useState([
-    { id: 9,  gridColumn: "span 8",  gridRow: "span 2", content: null },
-    { id: 10, gridColumn: "span 4",  gridRow: "span 2", content: null },
+    { id: 9,  gridColumn: "span 4",  gridRow: "span 2", content: null },
+    { id: 10, gridColumn: "span 8",  gridRow: "span 2", content: null },
     {
       id: 7,
       gridColumn: "span 12",
@@ -419,14 +419,14 @@ const Dashboard = () => {
 
     // ─── Printer controls card (box 9) ──────────────────────────────────────
     if (box.id === 9) {
-      // Compact landscape: card is 8 cols (~786px) x 2 rows (~148px).
-      // Buttons at 40px min-height + title ~18px + padding 7px each side = fits.
-      const btnMinH    = isCompactLandscape ? 40  : isExtraSmallScreen ? 44 : isFiveInch ? 48 : isSmallScreen ? 52 : 64;
-      const btnFont    = isCompactLandscape ? "11px" : isExtraSmallScreen ? "11px" : isFiveInch ? "12px" : "13px";
-      const btnPad     = isCompactLandscape ? "4px 8px"  : isExtraSmallScreen ? "4px 6px" : isFiveInch ? "8px 10px" : "10px 12px";
-      const cardPad    = isCompactLandscape ? "7px"  : isFiveInch ? "10px" : "12px";
-      const innerGap   = isCompactLandscape ? "4px"  : isFiveInch ? "6px" : "8px";
-      const sectionPad = isCompactLandscape ? "6px"  : "10px";
+      // Compact landscape: card is now 4 cols (~394px) x 2 rows (~148px).
+      // Buttons need to be compact — 32px fits title + 3 buttons + status tiles.
+      const btnMinH    = isCompactLandscape ? 30  : isExtraSmallScreen ? 44 : isFiveInch ? 48 : isSmallScreen ? 52 : 64;
+      const btnFont    = isCompactLandscape ? "10px" : isExtraSmallScreen ? "11px" : isFiveInch ? "12px" : "13px";
+      const btnPad     = isCompactLandscape ? "2px 4px"  : isExtraSmallScreen ? "4px 6px" : isFiveInch ? "8px 10px" : "10px 12px";
+      const cardPad    = isCompactLandscape ? "5px"  : isFiveInch ? "10px" : "12px";
+      const innerGap   = isCompactLandscape ? "3px"  : isFiveInch ? "6px" : "8px";
+      const sectionPad = isCompactLandscape ? "4px"  : "10px";
 
       const utilBtnBase = {
         fontSize: btnFont, padding: btnPad,
@@ -465,10 +465,10 @@ const Dashboard = () => {
       const statusCardStyle = {
         ...panelStyle,
         display: "flex", flexDirection: "column", justifyContent: "center",
-        flex: 1, p: isCompactLandscape ? "5px 8px" : "10px 12px",
+        flex: 1, p: isCompactLandscape ? "4px 6px" : "10px 12px",
       };
       const statusFontSize  = isCompactLandscape ? "10px" : "14px";
-      const statusIconSize  = isCompactLandscape ? 11 : 14;
+      const statusIconSize  = isCompactLandscape ? 10 : 14;
       const labelFontSize   = isCompactLandscape ? "9px" : "12px";
 
       return {
@@ -486,7 +486,7 @@ const Dashboard = () => {
               <Box
                 display="flex" flexDirection="column" gap={isCompactLandscape ? "3px" : "10px"}
                 minHeight={0}
-                sx={{ ...panelStyle, flex: "0 0 58%", overflow: "hidden", p: sectionPad }}
+                sx={{ ...panelStyle, flex: isCompactLandscape ? "0 0 52%" : "0 0 58%", overflow: "hidden", p: sectionPad }}
               >
                 {/* Always 3 columns on landscape — all three buttons in one row */}
                 <Box
@@ -528,7 +528,7 @@ const Dashboard = () => {
               <Box sx={{ width: "2px", alignSelf: "stretch", backgroundColor: "#808080", borderRadius: "2px" }} />
 
               {/* Right: status tiles */}
-              <Box display="flex" flexDirection="column" gap={isCompactLandscape ? "3px" : "8px"} minHeight={0} sx={{ flex: "0 0 42%" }}>
+              <Box display="flex" flexDirection="column" gap={isCompactLandscape ? "3px" : "8px"} minHeight={0} sx={{ flex: isCompactLandscape ? "0 0 44%" : "0 0 42%" }}>
                 <Box display="flex" flexDirection="row" gap={isCompactLandscape ? "3px" : "8px"} minHeight={0}>
                   <Box sx={{ ...statusCardStyle, flex: 1, minWidth: 0 }}>
                     <Box display="flex" alignItems="center" gap="3px">
@@ -645,7 +645,8 @@ const Dashboard = () => {
       if (box.id === 9) {
         return {
           ...box,
-          gridColumn: isCompactLandscapeLayout ? "span 8"
+          // Compact landscape: narrower card (span 4) — controls are secondary to camera
+          gridColumn: isCompactLandscapeLayout ? "span 4"
                     : isMobile                 ? "span 12"
                     : isCompactPanel           ? "span 12"
                     :                           "span 8",
@@ -660,7 +661,8 @@ const Dashboard = () => {
       if (box.id === 10) {
         return {
           ...box,
-          gridColumn: isCompactLandscapeLayout ? "span 4"
+          // Compact landscape: larger card (span 8) — camera feed is primary
+          gridColumn: isCompactLandscapeLayout ? "span 8"
                     : isMobile                 ? "span 12"
                     : isCompactPanel           ? "span 12"
                     :                           "span 4",
