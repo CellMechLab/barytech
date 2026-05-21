@@ -17,9 +17,9 @@ Usage
     python local_agent.py
 
     # or with overrides:
-    HDF5_WATCH_DIR=/data/barytech \
-    DEVICE_B_URL=https://mycloud.example.com \
-    DEVICE_B_API_KEY=secret-key-here \
+    AGENT_WATCH_DIR=/data/barytech \
+    AGENT_TARGET_URL=https://mycloud.example.com \
+    AGENT_API_KEY=secret-key-here \
     python local_agent.py
 
 Stop with Ctrl-C.
@@ -51,14 +51,16 @@ _stop_event: "threading.Event | None" = None
 
 # ---------------------------------------------------------------------------
 # Config from environment
+# All variables are prefixed AGENT_ to avoid collisions with pydantic-settings
+# which raises extra_forbidden if it finds unknown env vars in Settings models.
 # ---------------------------------------------------------------------------
 
-WATCH_DIR       = Path(os.getenv("HDF5_WATCH_DIR",  "/data/barytech"))
-POLL_INTERVAL   = float(os.getenv("HDF5_POLL_INTERVAL",  "5.0"))
-STABILITY_SECS  = float(os.getenv("HDF5_STABILITY_SECS", "2.0"))
-DEVICE_B_URL    = os.getenv("DEVICE_B_URL",    "https://mycloud.example.com")
-API_KEY         = os.getenv("DEVICE_B_API_KEY", "change-me")
-LEDGER_DB       = os.getenv("HDF5_LEDGER_DB",  "uploaded_files.db")
+WATCH_DIR       = Path(os.getenv("AGENT_WATCH_DIR",  "/data/barytech"))
+POLL_INTERVAL   = float(os.getenv("AGENT_POLL_INTERVAL",  "5.0"))
+STABILITY_SECS  = float(os.getenv("AGENT_STABILITY_SECS", "2.0"))
+DEVICE_B_URL    = os.getenv("AGENT_TARGET_URL",    "https://mycloud.example.com")
+API_KEY         = os.getenv("AGENT_API_KEY", "change-me")
+LEDGER_DB       = os.getenv("AGENT_LEDGER_DB",  "uploaded_files.db")
 GLOB_PATTERNS   = ["**/*.h5", "**/*.hdf5"]
 
 # Retry settings
