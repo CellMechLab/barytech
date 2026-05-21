@@ -180,8 +180,10 @@ import numpy as np
 
 async def export_device_data_to_hdf5(file_path: str = "data/device_data.hdf5"):
     """Export DeviceData to an HDF5 file with curve0/segment0/Force,Z structure."""
-    # Ensure data directory exists
-    os.makedirs("data", exist_ok=True)
+    # Resolves the destination directory from the provided export path.
+    export_directory_path = os.path.dirname(file_path) or "."
+    # Ensures the destination directory exists before writing the HDF5 file.
+    os.makedirs(export_directory_path, exist_ok=True)
     
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(DeviceData))
@@ -220,4 +222,6 @@ async def export_device_data_to_hdf5(file_path: str = "data/device_data.hdf5"):
             segment_group.create_dataset("Force", data=np.array(force_values, dtype=float))
             segment_group.create_dataset("Z", data=np.array(z_values, dtype=float))
 
-        print(f"Exported {len(force_values)} records to {file_path}")
+        # Logs the absolute output location to simplify export-path debugging.
+        resolved_output_file_path = os.path.abspath(file_path)
+        print(f"Exported {len(force_values)} records to {resolved_output_file_path}")

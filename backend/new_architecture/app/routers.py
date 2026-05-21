@@ -1,3 +1,5 @@
+"""API routes for device CRUD operations, telemetry access, and data export."""
+
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.schemas import IoTDeviceCreate, IoTDeviceResponse, DeviceDataResponse
@@ -142,11 +144,29 @@ async def delete_device_data(
 
 from fastapi.responses import FileResponse
 import os
+from datetime import datetime
 from app.db import export_device_data_to_hdf5  
 
 @router.get("/export/device_data")
 async def download_device_data():
-    file_path = "device_data.hdf5"
+    # Defines the preferred absolute directory for exported HDF5 files.
+    preferred_export_directory_path = "/data/barytech"
+    # Defines a writable project-local fallback when `/data` is read-only.
+    fallback_export_directory_path = os.path.join(os.getcwd(), "data", "barytech")
+    # Stores the resolved export directory chosen for this request.
+    export_directory_path = preferred_export_directory_path
+    # Prevent crash when deployment filesystem blocks writes to `/data`.
+    try:
+        os.makedirs(preferred_export_directory_path, exist_ok=True)
+    except OSError:
+        export_directory_path = fallback_export_directory_path
+        os.makedirs(export_directory_path, exist_ok=True)
+    # Generates a timestamp suffix for chronological and unique export filenames.
+    export_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    # Defines the download filename for this specific export request.
+    export_filename = f"device_data_{export_timestamp}.hdf5"
+    # Builds the absolute export file path with the required .hdf5 extension.
+    file_path = os.path.join(export_directory_path, export_filename)
     await export_device_data_to_hdf5(file_path)
 
     if not os.path.exists(file_path):
@@ -154,6 +174,6 @@ async def download_device_data():
 
     return FileResponse(
         path=file_path,
-        filename="device_data.hdf5",
+        filename=export_filename,
         media_type="application/octet-stream"
     )

@@ -34,3 +34,7 @@ pydantic-settings==2.13.1
 # MQTT (optional - can be removed for simplified deployment)
 paho-mqtt==1.6.1
 # gmqtt==0.6.14
+
+# HTTP client (local agent cloud upload)
+httpx==0.28.1
+httpcore==1.0.9

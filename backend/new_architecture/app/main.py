@@ -19,6 +19,7 @@ import strawberry
 from strawberry.fastapi import GraphQLRouter
 from app.metrics import router as metrics_router
 from app.printer_router import printer_service, get_printer_status
+import local_agent
 
 
 @strawberry.type
@@ -53,7 +54,25 @@ async def lifespan(app: FastAPI):
     from app.mqtt_client import start_monitoring
     monitoring_task = asyncio.create_task(start_monitoring())
 
+    # Start the HDF5 local agent in a background daemon thread.
+    # local_agent.main() is a blocking polling loop — running it in a thread
+    # keeps it off the FastAPI event loop entirely.  We signal it to stop via
+    # a threading.Event so it can finish uploading the current file cleanly.
+    _agent_stop = threading.Event()
+    local_agent._stop_event = _agent_stop
+    agent_thread = threading.Thread(
+        target=local_agent.main,
+        name="hdf5-local-agent",
+        daemon=True,
+    )
+    agent_thread.start()
+
     yield
+
+    # Signal the agent loop to exit after its current iteration finishes,
+    # then wait up to 10 s before the process tears down.
+    _agent_stop.set()
+    agent_thread.join(timeout=10)
 
     # Prevent noisy cancellation warnings when stopping background worker tasks.
     if raw_message_processor_task:
