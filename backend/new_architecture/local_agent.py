@@ -170,9 +170,24 @@ def _file_is_stable(path: Path, secs: float) -> bool:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # When embedded in FastAPI the thread must never call sys.exit() —
+    # that raises SystemExit inside the thread which bubbles up as a noisy
+    # traceback without actually stopping the process.  Instead we retry
+    # until the directory appears (e.g. a mount that isn't ready yet) or
+    # the stop event is signalled.
+    stop_event = _stop_event if _stop_event is not None else threading.Event()
     if not WATCH_DIR.exists():
-        log.error("Watch directory does not exist: %s", WATCH_DIR)
-        sys.exit(1)
+        log.warning(
+            "Watch directory does not exist yet: %s — "
+            "retrying every %.0f s until it appears or app shuts down",
+            WATCH_DIR, POLL_INTERVAL,
+        )
+        while not WATCH_DIR.exists():
+            if stop_event.is_set():
+                log.info("Stop requested before watch dir appeared — exiting agent")
+                return
+            stop_event.wait(timeout=POLL_INTERVAL)
+        log.info("Watch directory now available: %s", WATCH_DIR)
 
     ledger = Ledger()
 
@@ -189,10 +204,6 @@ def main() -> None:
         log.warning("http2 extras missing; falling back to HTTP/1.1 client")
         # Uses a compatible HTTP/1.1 client when HTTP/2 support is unavailable.
         client = httpx.Client(headers=client_headers)
-
-    # Use the externally injected stop event when embedded in another process
-    # (e.g. FastAPI lifespan), or create a local one for standalone execution.
-    stop_event = _stop_event if _stop_event is not None else threading.Event()
 
     # Signal handlers can only be registered from the main thread.
     # When embedded inside FastAPI the lifespan owns signal handling,
