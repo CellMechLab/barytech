@@ -66,6 +66,7 @@ async def lifespan(app: FastAPI):
         daemon=True,
     )
     agent_thread.start()
+    print(f"[agent] thread alive: {agent_thread.is_alive()}, watching: {local_agent.WATCH_DIR}")
 
     yield
 

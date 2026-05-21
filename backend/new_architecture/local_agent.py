@@ -17,7 +17,7 @@ Usage
     python local_agent.py
 
     # or with overrides:
-    AGENT_WATCH_DIR=/data/barytech \
+    AGENT_WATCH_DIR=data/barytech \
     AGENT_TARGET_URL=https://mycloud.example.com \
     AGENT_API_KEY=secret-key-here \
     python local_agent.py
@@ -35,6 +35,11 @@ import time
 from pathlib import Path
 
 import httpx          # pip install httpx
+from dotenv import load_dotenv   # pip install python-dotenv (already in your requirements)
+
+# Load .env from the project root (one level up from wherever this file lives)
+load_dotenv(Path(__file__).parent / ".env")   # if local_agent.py is in new_architecture/
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,7 +60,7 @@ _stop_event: "threading.Event | None" = None
 # which raises extra_forbidden if it finds unknown env vars in Settings models.
 # ---------------------------------------------------------------------------
 
-WATCH_DIR       = Path(os.getenv("AGENT_WATCH_DIR",  "/data/barytech"))
+WATCH_DIR       = Path(os.getenv("AGENT_WATCH_DIR",  "data/barytech"))
 POLL_INTERVAL   = float(os.getenv("AGENT_POLL_INTERVAL",  "5.0"))
 STABILITY_SECS  = float(os.getenv("AGENT_STABILITY_SECS", "2.0"))
 DEVICE_B_URL    = os.getenv("AGENT_TARGET_URL",    "https://mycloud.example.com")
