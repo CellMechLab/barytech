@@ -18,6 +18,8 @@ import DraggableBox from "./DraggableBox";
 import { WebSocketContext } from "./WebSocketProvider";
 import usePrinterControls from "./hooks/usePrinterControls";
 import useDeviceDataExport from "./hooks/useDeviceDataExport";
+import { useSave } from "../../context/SaveContext";
+import { toast } from "sonner";
 import BoltIcon from "@mui/icons-material/Bolt";
 import SwapHorizIcon from "@mui/icons-material/SwapHoriz";
 import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
@@ -32,6 +34,7 @@ import LinkIcon from "@mui/icons-material/Link";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import FileUploadIcon from "@mui/icons-material/FileUpload";
+import SaveAltIcon from "@mui/icons-material/SaveAlt";
 import { BACKEND_BASE_URL, VIDEO_BASE_URL } from "../../config/endpoints";
 
 const Dashboard = () => {
@@ -39,8 +42,10 @@ const Dashboard = () => {
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
   const [totalDataPoints, setTotalDataPoints] = useState(0);
-  const { dataBuffer } = useContext(WebSocketContext);
-  const [saveEnabled, setSaveEnabled] = useState(false);
+  // Pulls data stream, WS toggle, live connection state, and socket from shared context.
+  const { dataBuffer, toggleConnection, connected, socket } = useContext(WebSocketContext);
+  // Shared save-enabled flag so the save button and any other consumer stay in sync.
+  const { saveEnabled, setSaveEnabled } = useSave();
 
   const {
     printerActionInProgress,
@@ -56,11 +61,51 @@ const Dashboard = () => {
     handleEmergencyStop,
     handleExtrude,
     handleRetract,
+    handleStartIndentation,
     handleConnectPrinter,
     handleDisconnectPrinter,
   } = usePrinterControls(backendApiUrl);
 
   const { downloadDeviceData } = useDeviceDataExport(backendApiUrl);
+
+  /**
+   * Unified connect/disconnect handler for the Controls & Status card.
+   * Toggles both the backend data WebSocket and the printer serial connection
+   * so a single button drives the full connection lifecycle.
+   */
+  const handleCombinedConnectionToggle = async () => {
+    if (connected) {
+      // Close the backend data WebSocket first, then release the printer serial port.
+      toggleConnection();
+      await handleDisconnectPrinter();
+    } else {
+      // Open the backend data WebSocket first, then open the printer serial port.
+      toggleConnection();
+      await handleConnectPrinter();
+    }
+  };
+
+  /**
+   * Toggles save mode: flips the shared flag and notifies the backend over WebSocket.
+   * Requires an open socket — shows a toast error if the connection is not ready.
+   */
+  const handleSaveToggle = () => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const newSaveState = !saveEnabled;
+      setSaveEnabled(newSaveState);
+      // Inform backend so it starts/stops persisting incoming device data.
+      socket.send(JSON.stringify({ type: "save", save: newSaveState }));
+      toast(
+        newSaveState ? "Save mode enabled." : "Save mode disabled.",
+        { style: { backgroundColor: newSaveState ? "#3da58a" : "#d32f2f", color: "white" } }
+      );
+    } else {
+      // Prevent silent failure when save is clicked before a WS connection exists.
+      toast.error("Connect first before enabling save.", {
+        style: { backgroundColor: "red", color: "white" },
+      });
+    }
+  };
 
   const handleDataPointCountChange = (count) => {
     setTotalDataPoints(count);
@@ -92,9 +137,9 @@ const Dashboard = () => {
     : "20px";
 
   // ─── Layout helpers ──────────────────────────────────────────────────────────
-  // Header is hidden on compact displays — every vertical pixel matters.
+  // Header is hidden only on small/mobile screens; compact landscape (1280×720) shows a condensed header row.
   const showDashboardHeader =
-    !isSmallScreen && !isSevenInchDisplay && !isCompactLandscape;
+    !isSmallScreen && !isSevenInchDisplay;
 
   const dashboardOuterMargin = isExtraSmallScreen
     ? "6px"
@@ -133,6 +178,9 @@ const Dashboard = () => {
     : isSmallScreen
     ? "minmax(100px, auto)"
     : "minmax(140px, auto)";
+
+  // Controls whether the Camera View card shows manual jog controls or automatic mode.
+  const [cameraMode, setCameraMode] = useState("manual");
 
   const [transformedData, setTransformedData] = useState({ series1: [], series2: [] });
   const [series1Data, setSeries1Data] = useState([]);
@@ -193,8 +241,8 @@ const Dashboard = () => {
   const chartHeaderPx = isCompactLandscape ? "10px" : isExtraSmallScreen ? "8px"  : isSmallScreen ? "14px" : "24px";
 
   const [boxes, setBoxes] = useState([
-    { id: 9,  gridColumn: "span 8",  gridRow: "span 2", content: null },
-    { id: 10, gridColumn: "span 4",  gridRow: "span 2", content: null },
+    { id: 9,  gridColumn: "span 7",  gridRow: "span 2", content: null },
+    { id: 10, gridColumn: "span 5",  gridRow: "span 2", content: null },
     {
       id: 7,
       gridColumn: "span 12",
@@ -236,27 +284,15 @@ const Dashboard = () => {
       ),
     },
     {
-      id: 1,
-      content: <ControlButton type="connection" />,
-      gridColumn: "span 2",
-      gridRow: "span 1",
-    },
-    {
-      id: 2,
-      content: <ControlButton type="save" saveEnabled={saveEnabled} setSaveEnabled={setSaveEnabled} />,
-      gridColumn: "span 2",
-      gridRow: "span 1",
-    },
-    {
       id: 3,
       content: (
         <StatBox
           measurementColor="#006666"
-          title="Displacement Last Value"
-          subtitle={`${transformedData.series1?.[0]?.value || "-"} cm`}
+          title="Displacement Avg"
+          subtitle="— cm"
         />
       ),
-      gridColumn: "span 2",
+      gridColumn: "span 6",
       gridRow: "span 1",
       lineColor: "#009688",
       areaColor: "rgba(0,150,136,0.2)",
@@ -267,11 +303,11 @@ const Dashboard = () => {
       content: (
         <StatBox
           measurementColor="#D35400"
-          title="Force Last Value"
-          subtitle={`${transformedData.series1?.[0]?.value || "-"} N`}
+          title="Force Avg"
+          subtitle="— N"
         />
       ),
-      gridColumn: "span 2",
+      gridColumn: "span 6",
       gridRow: "span 1",
       lineColor: "#FF9800",
       areaColor: "rgba(255,152,0,0.2)",
@@ -282,8 +318,8 @@ const Dashboard = () => {
   const updatedBoxes = boxes.map((box) => {
     // ─── Camera card (box 10) ────────────────────────────────────────────────
     if (box.id === 10) {
-      // Compact landscape card: 4 cols wide (~394px), 2 rows tall (~148px).
-      // Jog pad at 34px/cell: 3x34 + 2x2 = 106px — fits in ~110px available content.
+      // Compact landscape card: 5 cols wide (~490px), 2 rows tall (~148px).
+      // Jog pad at 34px/cell: 3x34 + 2x2 = 106px — fits in available content height.
       const cameraJogControlSize = isExtraSmallScreen ? 34
         : isFiveInch          ? 40
         : isSmallScreen       ? 42
@@ -322,79 +358,141 @@ const Dashboard = () => {
       const cardGap  = isCompactLandscape ? "4px"  : isFiveInch ? "6px" : "8px";
       const jogGap   = isCompactLandscape ? "2px"  : "3px";
 
+      // Shared tab button style — active tab gets a solid green fill.
+      const tabBtnStyle = (mode) => ({
+        fontSize:        isCompactLandscape ? "9px" : "11px",
+        padding:         isCompactLandscape ? "1px 6px" : "2px 10px",
+        minWidth:        0,
+        color:           colors.grey[100],
+        border:          `1px solid ${colors.greenAccent[500]}`,
+        borderRadius:    "4px",
+        backgroundColor: cameraMode === mode ? colors.greenAccent[700] : "transparent",
+        "&:hover":       { backgroundColor: colors.greenAccent[600] },
+        textTransform:   "none",
+      });
+
+      // Style for the Start Indentation button in automatic mode.
+      const startIndentBtnStyle = {
+        fontSize:        isCompactLandscape ? "11px" : "13px",
+        padding:         isCompactLandscape ? "6px 10px" : "10px 16px",
+        color:           colors.grey[100],
+        border:          `1px solid ${colors.blueAccent[400]}`,
+        backgroundColor: colors.blueAccent[700],
+        borderRadius:    "6px",
+        "&:hover":       { backgroundColor: colors.blueAccent[600] },
+        "&:disabled":    { opacity: 0.35 },
+        textTransform:   "none",
+        minWidth:        0,
+      };
+
       return {
         ...box,
         content: (
           <Box width="100%" p={cardPad} height="100%" display="flex" flexDirection="column" gap={cardGap} sx={{ overflow: "hidden", boxSizing: "border-box" }}>
-            <Typography fontWeight="bold" sx={{ color: colors.grey[100] }} fontSize={titleFontSize}>
-              Camera View
-            </Typography>
+            {/* Header row: title + mode tabs */}
+            <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ flexShrink: 0 }}>
+              <Typography fontWeight="bold" sx={{ color: colors.grey[100] }} fontSize={titleFontSize}>
+                Camera View
+              </Typography>
+              {/* Manual / Automatic tab toggle */}
+              <Box display="flex" gap="4px">
+                <Button size="small" sx={tabBtnStyle("manual")} onClick={() => setCameraMode("manual")}>
+                  Manual
+                </Button>
+                <Button size="small" sx={tabBtnStyle("auto")} onClick={() => setCameraMode("auto")}>
+                  Automatic
+                </Button>
+              </Box>
+            </Box>
 
             {/* Always row layout on landscape (compact or full) */}
             <Box display="flex" flexDirection="row" flexGrow={1} minHeight={0} sx={{ overflow: "hidden" }}>
 
-              {/* Controls column */}
+              {/* Controls column — content switches based on active mode */}
               <Box display="flex" flexDirection="column" gap={cardGap} sx={{ flex: "0 0 auto", minWidth: 0, overflow: "hidden", pr: "6px" }}>
-                {/* Step selector */}
-                <Box display="flex" alignItems="center" gap="3px" flexWrap="wrap">
-                  <Typography fontSize="9px" sx={{ color: colors.grey[400] }}>Step:</Typography>
-                  {[0.1, 1, 10].map((step) => (
-                    <Button key={step} size="small" sx={cameraStepBtnStyle(step)} onClick={() => setJogStep(step)}>
-                      {step}
-                    </Button>
-                  ))}
-                  <Typography fontSize="9px" sx={{ color: colors.grey[400] }}>mm</Typography>
-                </Box>
 
-                {/* XY + Z jog pads */}
-                <Box display="flex" gap="5px" alignItems="flex-start">
-                  {/* Head XY */}
-                  <Box display="flex" flexDirection="column" alignItems="center" gap="2px">
-                    <Typography fontSize="9px" sx={{ color: colors.grey[400] }}>XY</Typography>
-                    <Box
-                      display="grid"
-                      gridTemplateColumns={`repeat(3, ${cameraJogControlSize}px)`}
-                      gridTemplateRows={`repeat(3, ${cameraJogControlSize}px)`}
-                      gap={jogGap}
+                {cameraMode === "manual" ? (
+                  <>
+                    {/* Step selector */}
+                    <Box display="flex" alignItems="center" gap="3px" flexWrap="wrap">
+                      <Typography fontSize="9px" sx={{ color: colors.grey[400] }}>Step:</Typography>
+                      {[0.1, 1, 10].map((step) => (
+                        <Button key={step} size="small" sx={cameraStepBtnStyle(step)} onClick={() => setJogStep(step)}>
+                          {step}
+                        </Button>
+                      ))}
+                      <Typography fontSize="9px" sx={{ color: colors.grey[400] }}>mm</Typography>
+                    </Box>
+
+                    {/* XY + Z jog pads */}
+                    <Box display="flex" gap="5px" alignItems="flex-start">
+                      {/* Head XY */}
+                      <Box display="flex" flexDirection="column" alignItems="center" gap="2px">
+                        <Typography fontSize="9px" sx={{ color: colors.grey[400] }}>XY</Typography>
+                        <Box
+                          display="grid"
+                          gridTemplateColumns={`repeat(3, ${cameraJogControlSize}px)`}
+                          gridTemplateRows={`repeat(3, ${cameraJogControlSize}px)`}
+                          gap={jogGap}
+                        >
+                          <Box />
+                          <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Y", 1)} sx={cameraJogBtnStyle}>
+                            <ArrowUpwardIcon sx={{ fontSize: cameraJogIconSize }} />
+                          </IconButton>
+                          <Box />
+                          <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("X", -1)} sx={cameraJogBtnStyle}>
+                            <ArrowBackIcon sx={{ fontSize: cameraJogIconSize }} />
+                          </IconButton>
+                          <Box display="flex" alignItems="center" justifyContent="center" sx={{ backgroundColor: colors.primary[400], borderRadius: "5px" }}>
+                            <Typography fontSize="8px" sx={{ color: colors.grey[400] }}>XY</Typography>
+                          </Box>
+                          <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("X", 1)} sx={cameraJogBtnStyle}>
+                            <ArrowForwardIcon sx={{ fontSize: cameraJogIconSize }} />
+                          </IconButton>
+                          <Box />
+                          <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Y", -1)} sx={cameraJogBtnStyle}>
+                            <ArrowDownwardIcon sx={{ fontSize: cameraJogIconSize }} />
+                          </IconButton>
+                          <Box />
+                        </Box>
+                      </Box>
+
+                      {/* Bed Z */}
+                      <Box display="flex" flexDirection="column" alignItems="center" gap="2px">
+                        <Typography fontSize="9px" sx={{ color: colors.grey[400] }}>Z</Typography>
+                        <Box display="flex" flexDirection="column" alignItems="center" gap={jogGap}>
+                          <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Z", -1)} sx={cameraJogBtnStyle}>
+                            <ArrowUpwardIcon sx={{ fontSize: cameraJogIconSize }} />
+                          </IconButton>
+                          <Box display="flex" alignItems="center" justifyContent="center" sx={{ width: cameraJogControlSize, height: cameraJogControlSize, backgroundColor: colors.primary[400], borderRadius: "5px" }}>
+                            <Typography fontSize="8px" sx={{ color: colors.grey[400] }}>Z</Typography>
+                          </Box>
+                          <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Z", 1)} sx={cameraJogBtnStyle}>
+                            <ArrowDownwardIcon sx={{ fontSize: cameraJogIconSize }} />
+                          </IconButton>
+                        </Box>
+                      </Box>
+                    </Box>
+                  </>
+                ) : (
+                  /* Automatic mode — single Start Indentation action */
+                  <Box display="flex" flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap="8px">
+                    <Typography fontSize="9px" sx={{ color: colors.grey[400], textAlign: "center" }}>
+                      Automatic indentation test
+                    </Typography>
+                    <Button
+                      disabled={printerActionInProgress}
+                      onClick={handleStartIndentation}
+                      sx={startIndentBtnStyle}
                     >
-                      <Box />
-                      <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Y", 1)} sx={cameraJogBtnStyle}>
-                        <ArrowUpwardIcon sx={{ fontSize: cameraJogIconSize }} />
-                      </IconButton>
-                      <Box />
-                      <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("X", -1)} sx={cameraJogBtnStyle}>
-                        <ArrowBackIcon sx={{ fontSize: cameraJogIconSize }} />
-                      </IconButton>
-                      <Box display="flex" alignItems="center" justifyContent="center" sx={{ backgroundColor: colors.primary[400], borderRadius: "5px" }}>
-                        <Typography fontSize="8px" sx={{ color: colors.grey[400] }}>XY</Typography>
-                      </Box>
-                      <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("X", 1)} sx={cameraJogBtnStyle}>
-                        <ArrowForwardIcon sx={{ fontSize: cameraJogIconSize }} />
-                      </IconButton>
-                      <Box />
-                      <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Y", -1)} sx={cameraJogBtnStyle}>
-                        <ArrowDownwardIcon sx={{ fontSize: cameraJogIconSize }} />
-                      </IconButton>
-                      <Box />
-                    </Box>
+                      ▶ Start Indentation
+                    </Button>
+                    {/* Show last command status beneath the button */}
+                    <Typography fontSize="9px" sx={{ color: colors.greenAccent[400], textAlign: "center" }}>
+                      {printerActionStatus}
+                    </Typography>
                   </Box>
-
-                  {/* Bed Z */}
-                  <Box display="flex" flexDirection="column" alignItems="center" gap="2px">
-                    <Typography fontSize="9px" sx={{ color: colors.grey[400] }}>Z</Typography>
-                    <Box display="flex" flexDirection="column" alignItems="center" gap={jogGap}>
-                      <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Z", -1)} sx={cameraJogBtnStyle}>
-                        <ArrowUpwardIcon sx={{ fontSize: cameraJogIconSize }} />
-                      </IconButton>
-                      <Box display="flex" alignItems="center" justifyContent="center" sx={{ width: cameraJogControlSize, height: cameraJogControlSize, backgroundColor: colors.primary[400], borderRadius: "5px" }}>
-                        <Typography fontSize="8px" sx={{ color: colors.grey[400] }}>Z</Typography>
-                      </Box>
-                      <IconButton size="small" disabled={printerActionInProgress} onClick={() => handleJogAxis("Z", 1)} sx={cameraJogBtnStyle}>
-                        <ArrowDownwardIcon sx={{ fontSize: cameraJogIconSize }} />
-                      </IconButton>
-                    </Box>
-                  </Box>
-                </Box>
+                )}
               </Box>
 
               {/* Divider */}
@@ -419,14 +517,14 @@ const Dashboard = () => {
 
     // ─── Printer controls card (box 9) ──────────────────────────────────────
     if (box.id === 9) {
-      // Compact landscape: card is 8 cols (~786px) x 2 rows (~148px).
-      // Buttons at 40px min-height + title ~18px + padding 7px each side = fits.
-      const btnMinH    = isCompactLandscape ? 40  : isExtraSmallScreen ? 44 : isFiveInch ? 48 : isSmallScreen ? 52 : 64;
-      const btnFont    = isCompactLandscape ? "11px" : isExtraSmallScreen ? "11px" : isFiveInch ? "12px" : "13px";
-      const btnPad     = isCompactLandscape ? "4px 8px"  : isExtraSmallScreen ? "4px 6px" : isFiveInch ? "8px 10px" : "10px 12px";
-      const cardPad    = isCompactLandscape ? "7px"  : isFiveInch ? "10px" : "12px";
+      // Compact landscape: card is 7 cols (~726px) x 2 rows (~148px).
+      // Reduced button height/font/padding to free up space now that the card is narrower.
+      const btnMinH    = isCompactLandscape ? 32  : isExtraSmallScreen ? 44 : isFiveInch ? 48 : isSmallScreen ? 52 : 64;
+      const btnFont    = isCompactLandscape ? "10px" : isExtraSmallScreen ? "11px" : isFiveInch ? "12px" : "13px";
+      const btnPad     = isCompactLandscape ? "2px 6px"  : isExtraSmallScreen ? "4px 6px" : isFiveInch ? "8px 10px" : "10px 12px";
+      const cardPad    = isCompactLandscape ? "6px"  : isFiveInch ? "10px" : "12px";
       const innerGap   = isCompactLandscape ? "4px"  : isFiveInch ? "6px" : "8px";
-      const sectionPad = isCompactLandscape ? "6px"  : "10px";
+      const sectionPad = isCompactLandscape ? "5px"  : "10px";
 
       const utilBtnBase = {
         fontSize: btnFont, padding: btnPad,
@@ -445,7 +543,7 @@ const Dashboard = () => {
       };
       const connectBase = {
         ...utilBtnBase,
-        backgroundColor: printerConnected ? colors.greenAccent[700] : "transparent",
+        backgroundColor: connected ? colors.greenAccent[700] : "transparent",
       };
       const disconnectBase = {
         fontSize: btnFont, padding: btnPad,
@@ -454,6 +552,16 @@ const Dashboard = () => {
         "&:disabled": { opacity: 0.35 },
         minWidth: 0, minHeight: btnMinH,
       };
+      // Save button turns solid blue when save mode is active, transparent when off.
+      const saveBtnBase = {
+        fontSize: btnFont, padding: btnPad,
+        color: colors.grey[100],
+        border: `1px solid ${colors.blueAccent[400]}`,
+        backgroundColor: saveEnabled ? colors.blueAccent[700] : "transparent",
+        "&:hover": { backgroundColor: colors.blueAccent[600] },
+        minWidth: 0, minHeight: btnMinH,
+      };
+      // Ensures every action button stretches to fill its grid cell.
       const fullWidth = { width: "100%", minHeight: btnMinH };
 
       const panelStyle = {
@@ -476,7 +584,7 @@ const Dashboard = () => {
         content: (
           <Box p={cardPad} display="flex" flexDirection="column" gap={innerGap} height="100%" width="100%" minHeight={0} sx={{ overflow: "hidden", boxSizing: "border-box" }}>
             <Typography fontWeight="bold" sx={{ color: colors.grey[100] }} fontSize={titleFontSize}>
-              Printer Controls & Status
+              Controls & Status
             </Typography>
 
             {/* Always row layout on landscape */}
@@ -488,27 +596,27 @@ const Dashboard = () => {
                 minHeight={0}
                 sx={{ ...panelStyle, flex: "0 0 58%", overflow: "hidden", p: sectionPad }}
               >
-                {/* Always 3 columns on landscape — all three buttons in one row */}
+                {/* 4 columns: Connect · Home · E-Stop · Save */}
                 <Box
                   display="grid"
-                  gridTemplateColumns="repeat(3, minmax(0, 1fr))"
+                  gridTemplateColumns="repeat(4, minmax(0, 1fr))"
                   gridAutoRows={`minmax(${btnMinH}px, auto)`}
-                  gap={isCompactLandscape ? "6px" : "10px"}
+                  gap={isCompactLandscape ? "5px" : "8px"}
                   flexGrow={1}
                   minHeight={0}
                 >
                   <Button
                     disabled={printerActionInProgress}
-                    onClick={printerConnected ? handleDisconnectPrinter : handleConnectPrinter}
-                    startIcon={printerConnected ? <LinkOffIcon sx={{ fontSize: 12 }} /> : <LinkIcon sx={{ fontSize: 12 }} />}
-                    sx={{ ...(printerConnected ? disconnectBase : connectBase), ...fullWidth }}
+                    onClick={handleCombinedConnectionToggle}
+                    startIcon={connected ? <LinkOffIcon sx={{ fontSize: 11 }} /> : <LinkIcon sx={{ fontSize: 11 }} />}
+                    sx={{ ...(connected ? disconnectBase : connectBase), ...fullWidth }}
                   >
-                    {printerConnected ? "Disconnect" : "Connect"}
+                    {connected ? "Disconnect" : "Connect"}
                   </Button>
                   <Button
                     disabled={printerActionInProgress}
                     onClick={handleHomePrinter}
-                    startIcon={<HomeIcon sx={{ fontSize: 12 }} />}
+                    startIcon={<HomeIcon sx={{ fontSize: 11 }} />}
                     sx={{ ...utilBtnBase, ...fullWidth }}
                   >
                     Home All
@@ -516,10 +624,17 @@ const Dashboard = () => {
                   <Button
                     disabled={printerActionInProgress}
                     onClick={handleEmergencyStop}
-                    startIcon={<StopIcon sx={{ fontSize: 12 }} />}
+                    startIcon={<StopIcon sx={{ fontSize: 11 }} />}
                     sx={{ ...eStopBase, ...fullWidth }}
                   >
                     E-STOP
+                  </Button>
+                  <Button
+                    onClick={handleSaveToggle}
+                    startIcon={<SaveAltIcon sx={{ fontSize: 11 }} />}
+                    sx={{ ...saveBtnBase, ...fullWidth }}
+                  >
+                    {saveEnabled ? "Saving" : "Save"}
                   </Button>
                 </Box>
               </Box>
@@ -568,26 +683,36 @@ const Dashboard = () => {
     }
 
     if (box.id === 3) {
+      // Computes the mean of all displacement values currently in the buffer.
+      const displacementAvg =
+        series1Data.length > 0
+          ? series1Data.reduce((sum, d) => sum + (d.value ?? 0), 0) / series1Data.length
+          : null;
       return {
         ...box,
         data: series1Data,
         content: (
           <StatBox
-            title="Displacement"
-            subtitle={`${series1Data?.[series1Data.length - 1]?.value?.toFixed(2) ?? "-"} cm`}
+            title="Displacement Avg"
+            subtitle={displacementAvg !== null ? `${displacementAvg.toFixed(2)} cm` : "—"}
             icon={<SwapHorizIcon style={{ color: "#009688", fontSize: isCompactLandscape ? 18 : 28 }} />}
           />
         ),
       };
     }
     if (box.id === 4) {
+      // Computes the mean of all force values currently in the buffer.
+      const forceAvg =
+        series2Data.length > 0
+          ? series2Data.reduce((sum, d) => sum + (d.value ?? 0), 0) / series2Data.length
+          : null;
       return {
         ...box,
         data: series2Data,
         content: (
           <StatBox
-            title="Force"
-            subtitle={`${series2Data?.[series2Data.length - 1]?.value?.toFixed(2) ?? "-"} cm`}
+            title="Force Avg"
+            subtitle={forceAvg !== null ? `${forceAvg.toFixed(2)} N` : "—"}
             icon={<BoltIcon style={{ color: "#FF9800", fontSize: isCompactLandscape ? 18 : 28 }} />}
           />
         ),
@@ -612,18 +737,13 @@ const Dashboard = () => {
 
     setBoxes((prev) => prev.map((box) => {
       // ── Stat + control widgets (1, 2, 3, 4) ───────────────────────────────
-      if ([1, 2, 3, 4].includes(box.id)) {
+      // Boxes 1 and 2 merged into box 9 — only stat boxes 3 and 4 remain in the top row.
+      // Two boxes fill 12 columns: each spans 6 on all layouts, full-width on small mobile.
+      if ([3, 4].includes(box.id)) {
         return {
           ...box,
-          // All four in one row across all landscape + compact layouts
-          gridColumn: isCompactLandscapeLayout ? "span 3"
-                    : isFiveInchLayout         ? "span 3"
-                    : isMobile                 ? "span 6"
-                    : isCompactPanel           ? "span 3"
-                    :                           "span 2",
-          gridRow: isMobile && !isFiveInchLayout && [3, 4].includes(box.id)
-            ? "span 2"
-            : "span 1",
+          gridColumn: isMobile ? "span 12" : "span 6",
+          gridRow: isMobile ? "span 2" : "span 1",
         };
       }
 
@@ -645,7 +765,8 @@ const Dashboard = () => {
       if (box.id === 9) {
         return {
           ...box,
-          gridColumn: isCompactLandscapeLayout ? "span 8"
+          // Compact landscape: narrowed to span 7 to give Camera View more room.
+          gridColumn: isCompactLandscapeLayout ? "span 7"
                     : isMobile                 ? "span 12"
                     : isCompactPanel           ? "span 12"
                     :                           "span 8",
@@ -660,7 +781,8 @@ const Dashboard = () => {
       if (box.id === 10) {
         return {
           ...box,
-          gridColumn: isCompactLandscapeLayout ? "span 4"
+          // Compact landscape: widened to span 5 for a larger live-feed area.
+          gridColumn: isCompactLandscapeLayout ? "span 5"
                     : isMobile                 ? "span 12"
                     : isCompactPanel           ? "span 12"
                     :                           "span 4",
@@ -685,7 +807,7 @@ const Dashboard = () => {
   return (
     <Box m={dashboardOuterMargin}>
       {showDashboardHeader && (
-        <Box display="flex" justifyContent="space-between" alignItems="center" mb="12px">
+        <Box display="flex" justifyContent="space-between" alignItems="center" mb={isCompactLandscape ? "5px" : "12px"}>
           <Header title="DASHBOARD" subtitle="Welcome to your dashboard" />
           <Box>
             <Button

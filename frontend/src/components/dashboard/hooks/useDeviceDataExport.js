@@ -15,11 +15,19 @@ const useDeviceDataExport = (backendApiUrl = BACKEND_BASE_URL) => {
   // Initiates a GET request to the export endpoint and streams the response as a file download.
   const downloadDeviceData = async () => {
     try {
-      const response = await fetch(`${backendApiUrl}/api/export/device_data`);
+      // Reads the JWT stored at login so the export endpoint can scope data to this user.
+      const token = sessionStorage.getItem("authToken");
+
+      const response = await fetch(`${backendApiUrl}/api/export/device_data`, {
+        headers: {
+          // Sends the bearer token required by the now-authenticated export route.
+          Authorization: `Bearer ${token}`,
+        },
+      });
 
       if (!response.ok) {
-        // Prevent silent failure when the export endpoint is unavailable.
-        throw new Error("Failed to download the file.");
+        // Prevent silent failure when the export endpoint is unavailable or unauthorized.
+        throw new Error(`Failed to download the file. Status: ${response.status}`);
       }
 
       // Convert the response body to a Blob so a URL can be created for the anchor tag.

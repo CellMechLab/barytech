@@ -68,8 +68,8 @@ try:
                 "displacement": disp,
                 "force": force,
                 "timestamp": timestamp,
-                "device_id": "A1SU4LEA9mnR",
-                "device_token": "FYDOraGWXbD2YkZ6",
+                "device_id": "Qz2f4BuKsdcW",
+                "device_token": "2iUnGOCh0w63eOWG",
             }
 
             # Use retain=False for streaming telemetry

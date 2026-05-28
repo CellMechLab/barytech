@@ -148,7 +148,10 @@ from datetime import datetime
 from app.db import export_device_data_to_hdf5  
 
 @router.get("/export/device_data")
-async def download_device_data():
+async def download_device_data(
+    # Restricts export to data owned by the authenticated user only.
+    user_id: int = Depends(get_current_user_id),
+):
     # Defines the preferred absolute directory for exported HDF5 files.
     preferred_export_directory_path = "/data/barytech"
     # Defines a writable project-local fallback when `/data` is read-only.
@@ -167,7 +170,7 @@ async def download_device_data():
     export_filename = f"device_data_{export_timestamp}.hdf5"
     # Builds the absolute export file path with the required .hdf5 extension.
     file_path = os.path.join(export_directory_path, export_filename)
-    await export_device_data_to_hdf5(file_path)
+    await export_device_data_to_hdf5(file_path, user_id)
 
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Export failed")

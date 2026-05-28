@@ -348,7 +348,27 @@ async def connect(body: dict = Body(default={})):
     Send a 'connect' action to the Pi.
     Accepts optional printer config fields: port, baud_rate, timeout,
     feed_xy, feed_z, feed_e.
+    Also publishes 'initiate_connection' to the MQTT broker to notify
+    any downstream subscribers that a connection attempt has been triggered.
     """
+    # Publish initiation signal to MQTT so subscribers are notified before the Pi handshake.
+    try:
+        from app.mqtt_client import get_mqtt_client
+        # Topic used for outbound printer control signals consumed by the device/Pi.
+        mqtt_publish_topic = "printer/connect"
+        # Payload that signals downstream consumers to begin their connection sequence.
+        mqtt_payload = "initiate_connection"
+        result = get_mqtt_client().publish(mqtt_publish_topic, mqtt_payload, qos=1)
+        # rc == 0 (MQTT_ERR_SUCCESS) means the message was queued successfully.
+        mqtt_status = "SUCCESS" if result.rc == 0 else f"ERROR (rc={result.rc})"
+        print(
+            f"[printer/connect] MQTT publish → topic='{mqtt_publish_topic}' "
+            f"payload='{mqtt_payload}' qos=1 | status={mqtt_status}"
+        )
+    except Exception as mqtt_exc:
+        # Prevent MQTT publish failure from blocking the printer connect flow.
+        print(f"[printer/connect] MQTT publish FAILED (non-fatal): {mqtt_exc}")
+
     data = await _ws_client.call("connect", body, timeout=15.0)
     return JSONResponse(content=data)
 
@@ -457,3 +477,43 @@ async def emergency_stop():
     """Halts the printer firmware. A physical reboot is required to resume."""
     data = await _ws_client.call("emergency_stop", timeout=10.0)
     return JSONResponse(content=data)
+
+
+# ---------------------------------------------------------------------------
+# Indentation routes
+# ---------------------------------------------------------------------------
+
+@router.post("/indentation/start", summary="Trigger an automated indentation test")
+async def start_indentation():
+    """
+    Publishes 'initiate_indentation' to the MQTT broker to signal all
+    downstream subscribers (device, Pi, data pipeline) that an automated
+    indentation test sequence should begin.
+    Does NOT forward anything to the Pi WebSocket — the MQTT message is the
+    sole trigger so the device firmware can coordinate its own sequence.
+    """
+    # Stores the MQTT topic used for indentation control signals.
+    mqtt_indentation_topic = "printer/indentation"
+    # Payload consumed by the device/firmware to start the indentation sequence.
+    mqtt_indentation_payload = "initiate_indentation"
+
+    try:
+        from app.mqtt_client import get_mqtt_client
+        result = get_mqtt_client().publish(
+            mqtt_indentation_topic, mqtt_indentation_payload, qos=1
+        )
+        # rc == 0 (MQTT_ERR_SUCCESS) means the message was queued/sent successfully.
+        mqtt_status = "SUCCESS" if result.rc == 0 else f"ERROR (rc={result.rc})"
+        print(
+            f"[indentation/start] MQTT publish → topic='{mqtt_indentation_topic}' "
+            f"payload='{mqtt_indentation_payload}' qos=1 | status={mqtt_status}"
+        )
+    except Exception as mqtt_exc:
+        # Prevent MQTT publish failure from returning a 500 to the frontend.
+        print(f"[indentation/start] MQTT publish FAILED (non-fatal): {mqtt_exc}")
+        return JSONResponse(
+            status_code=503,
+            content={"detail": f"MQTT unavailable: {mqtt_exc}"},
+        )
+
+    return JSONResponse(content={"detail": "Indentation sequence initiated", "mqtt_status": mqtt_status})

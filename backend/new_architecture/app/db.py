@@ -178,15 +178,24 @@ import os
 import h5py
 import numpy as np
 
-async def export_device_data_to_hdf5(file_path: str = "data/device_data.hdf5"):
-    """Export DeviceData to an HDF5 file with curve0/segment0/Force,Z structure."""
+async def export_device_data_to_hdf5(file_path: str = "data/device_data.hdf5", user_id: int = None):
+    """Export DeviceData to an HDF5 file with curve0/segment0/Force,Z structure.
+
+    When user_id is provided only rows whose parent IoTDevice belongs to that
+    user are included, preventing cross-user data leakage in the export.
+    """
     # Resolves the destination directory from the provided export path.
     export_directory_path = os.path.dirname(file_path) or "."
     # Ensures the destination directory exists before writing the HDF5 file.
     os.makedirs(export_directory_path, exist_ok=True)
-    
+
     async with AsyncSessionLocal() as session:
-        result = await session.execute(select(DeviceData))
+        # Build a query that joins DeviceData -> IoTDevice so we can filter by owner.
+        query = select(DeviceData).join(IoTDevice, IoTDevice.id == DeviceData.device_id)
+        # Apply user scope when a user_id is supplied; omit to export all rows.
+        if user_id is not None:
+            query = query.filter(IoTDevice.user_id == user_id)
+        result = await session.execute(query)
         data = result.scalars().all()
 
         if not data:

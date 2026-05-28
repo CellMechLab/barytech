@@ -19,6 +19,9 @@ device_broadcasters: Dict[str, asyncio.Task] = {}  # Track broadcaster tasks
 device_savers: Dict[str, asyncio.Task] = {}  # Track saver tasks
 global_message_queue: asyncio.Queue = asyncio.Queue()  # Global message queue
 
+# Cache mapping device_id -> user_id (str) to avoid repeated DB lookups per broadcast cycle
+device_user_map: Dict[str, str] = {}
+
 # Global counter for total messages sent to frontend
 total_messages_sent_to_frontend = 0
 
@@ -312,6 +315,39 @@ async def process_batch(device_id: str, batch: list):
 #             print(f"Total messages sent to frontend: {total_messages_sent_to_frontend}")
 #             await send_to_connected_clients(batch)
 
+async def _resolve_user_id_for_device(device_id: str) -> str:
+    """
+    Look up the user_id that owns this device from the database.
+    Result is cached in device_user_map to avoid repeated queries.
+    Falls back to "1" if the device is not found.
+    """
+    # Return cached value if already resolved
+    if device_id in device_user_map:
+        return device_user_map[device_id]
+
+    # Prevent crash if DB is temporarily unavailable during lookup
+    try:
+        from sqlalchemy.future import select
+        async with get_db() as db:
+            result = await db.execute(
+                select(IoTDevice).where(IoTDevice.id == device_id)
+            )
+            device = result.scalars().first()
+            if device and device.user_id:
+                # Cache as string because websocket_connections keys are strings
+                user_id_str = str(device.user_id)
+                device_user_map[device_id] = user_id_str
+                print(f"[RESOLVE] Device {device_id} belongs to user {user_id_str}")
+                return user_id_str
+    except Exception as e:
+        print(f"[RESOLVE] DB lookup failed for device {device_id}: {e}")
+
+    # Default fallback — device unknown or DB unreachable
+    print(f"[RESOLVE] Device {device_id} not found in DB, defaulting to user '1'")
+    device_user_map[device_id] = "1"
+    return "1"
+
+
 async def broadcast_messages(device_id: str):
     """Batch messages and broadcast them to WebSocket clients based on device_id."""
     global total_messages_sent_to_frontend
@@ -319,20 +355,10 @@ async def broadcast_messages(device_id: str):
     BATCH_TIMEOUT = 0.05  # Backend processing timeout
     queue = device_queues[device_id]
 
-    # Device to frontend mapping
-    device_to_frontend = {
-        "frontend1_device": "1",
-        "frontend1_high_perf_device": "1", 
-        "frontend1_ultra_high_perf_device": "1",  # New optimized publisher
-        "frontend2_device": "2",
-        "frontend2_high_perf_device": "2",
-        "frontend2_ultra_high_perf_device": "2"   # New optimized publisher
-    }
-    
-    # Get the target frontend for this device
-    target_frontend = device_to_frontend.get(device_id, "1")  # Default to frontend-1 if unknown
-    
-    print(f"🔀 Device {device_id} mapped to frontend-{target_frontend}")
+    # Resolve which user (WebSocket key) this device belongs to via DB lookup
+    target_frontend = await _resolve_user_id_for_device(device_id)
+
+    print(f"[ROUTE] Device {device_id} routed to user WebSocket key '{target_frontend}'")
 
     while True:
         batch = []

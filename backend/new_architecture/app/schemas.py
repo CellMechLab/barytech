@@ -46,7 +46,8 @@ class DeviceDataResponse(BaseModel):
 
 
 class UserResponse(BaseModel):
-    id: int
+    # Field name matches the key returned by the /me endpoint and expected by the frontend
+    user_id: int
     username: str
 
     class Config:

@@ -124,6 +124,13 @@ const usePrinterControls = (backendApiUrl = BACKEND_BASE_URL) => {
     );
   };
 
+  // ─── Automatic test commands ──────────────────────────────────────────────
+
+  // Sends the start-indentation command to trigger an automated indentation test sequence.
+  const handleStartIndentation = async () => {
+    await sendPrinterCommand("/printer/indentation/start", {}, "Indentation started");
+  };
+
   // ─── Connection commands ──────────────────────────────────────────────────
 
   // Opens the Pi serial port so motion commands can be sent.
@@ -154,6 +161,7 @@ const usePrinterControls = (backendApiUrl = BACKEND_BASE_URL) => {
     handleEmergencyStop,
     handleExtrude,
     handleRetract,
+    handleStartIndentation,
     handleConnectPrinter,
     handleDisconnectPrinter,
   };
