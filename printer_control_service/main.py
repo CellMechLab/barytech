@@ -31,6 +31,7 @@ from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from printer import Printer, PrinterConfig, PrinterNotConnectedError, PrinterTimeoutError
+import gpio_manager
 
 # ---------------------------------------------------------------------------
 # Logging setup  — outputs to stdout so uvicorn captures it
@@ -134,6 +135,7 @@ def _limits_check(axis: str, current_mm: float, delta_mm: float) -> tuple[bool, 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("=== Printer service starting ===")
+    gpio_manager.init_gpio()
     try:
         log.info("Auto-connecting serial port %s @ %d baud …",
                  _printer.config.port, _printer.config.baud_rate)
@@ -149,6 +151,7 @@ async def lifespan(app: FastAPI):
     if _printer.is_connected:
         _printer.disconnect()
         log.info("Serial port closed.")
+    gpio_manager.cleanup_gpio()
     _executor.shutdown(wait=False)
 
 
@@ -326,15 +329,26 @@ async def _dispatch(action: str, params: dict) -> dict:
             "feed":           feed,
         }
 
-    # ── Home (DISABLED) ───────────────────────────────────────────────────
-    # Uncomment to re-enable homing.
-    #
-    # if action == "home":
-    #     axes = params.get("axes")
-    #     log.info("HOMING  axes=%s", axes or "ALL")
-    #     await _run(_printer.home, axes)
-    #     log.info("HOMING COMPLETE")
-    #     return {"homed": True, "axes": axes or ["X", "Y", "Z"]}
+    # ── Home ─────────────────────────────────────────────────────────────
+    if action == "home":
+        axes = params.get("axes")   # e.g. ["X", "Y"] or None for all
+
+        # Check limit switches before homing — abort if any are already triggered,
+        # which could indicate a wiring fault or the axis is already at the endstop.
+        switch_states = gpio_manager.read_limit_switches()
+        triggered = {name: state for name, state in switch_states.items() if state}
+        if triggered:
+            msg = (
+                f"Home aborted: limit switch(es) already triggered before homing: "
+                f"{list(triggered.keys())}. Check wiring or clear obstruction."
+            )
+            log.warning("HOME ABORTED  %s", msg)
+            return {"homed": False, "warning": msg, "switches": switch_states}
+
+        log.info("HOMING  axes=%s  switches_ok=%s", axes or "ALL", switch_states)
+        await _run(_printer.home, axes)
+        log.info("HOMING COMPLETE")
+        return {"homed": True, "axes": axes or ["X", "Y", "Z"]}
 
     # ── Sensors ──────────────────────────────────────────────────────────
 
