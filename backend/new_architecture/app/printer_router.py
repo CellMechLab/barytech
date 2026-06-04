@@ -319,23 +319,38 @@ printer_service = PrinterService()
 
 async def get_printer_status() -> dict:
     """
-    Fetch live position + temperatures from the Pi in a single WebSocket call.
+    Fetch dashboard status from the Pi without blocking on slow M114/M105 serial.
+
+    Uses the lightweight ``status`` action (soft_position + connection flags).
+    The heavier ``printer_status`` action queries the firmware directly and can
+    exceed 10s when the printer is busy or not replying on serial.
 
     Returns a dict with keys:
         position     – { X, Y, Z, E }          (empty dict when offline)
-        temperatures – { hotend_temp, bed_temp } (None values when offline)
+        temperatures – { hotend_temp, bed_temp } (None when not polled)
+        connected    – whether the Pi serial port is open
 
     Never raises — returns safe fallback values so the push loop keeps running.
     """
+    # Default payload when the Pi is unreachable or returns an unexpected shape.
+    fallback = {
+        "position":     {},
+        "temperatures": {"hotend_temp": None, "bed_temp": None},
+        "connected":    False,
+    }
     try:
-        return await _ws_client.call("printer_status", timeout=10.0)
+        data = await _ws_client.call("status", timeout=8.0)
+        # Pi firmware-tracked position (fast); omit if an older Pi build lacks it.
+        position = data.get("soft_position") or data.get("position") or {}
+        return {
+            "position":     position,
+            "temperatures": {"hotend_temp": None, "bed_temp": None},
+            "connected":    bool(data.get("connected")),
+        }
     except (HTTPException, Exception) as exc:
         detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
         print(f"[get_printer_status] failed: {detail}")
-        return {
-            "position":     {},
-            "temperatures": {"hotend_temp": None, "bed_temp": None},
-        }
+        return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -415,13 +430,13 @@ async def move_up(body: dict = Body(default={})):
     return JSONResponse(content=data)
 
 
-# @router.post("/home", summary="Home axes (omit body to home all)")
-# async def home(body: dict = Body(default={})):
-#     """
-#     Body: { "axes": ["X", "Y"] }  —  omit or pass {} to home all axes.
-#     """
-#     data = await _ws_client.call("home", body, timeout=180.0)
-#     return JSONResponse(content=data)
+@router.post("/home", summary="Home axes (omit body to home all)")
+async def home(body: dict = Body(default={})):
+    """
+    Body: { "axes": ["X", "Y"] }  —  omit or pass {} to home all axes.
+    """
+    data = await _ws_client.call("home", body, timeout=180.0)
+    return JSONResponse(content=data)
 
 
 @router.get("/position", summary="Query current XYZ E position (M114)")

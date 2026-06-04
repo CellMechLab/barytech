@@ -269,7 +269,7 @@ _PRINTER_STATUS_INTERVAL = 2.0
 # Actions the frontend is allowed to trigger over /ws/printer
 _ALLOWED_PRINTER_ACTIONS = {
     "connect", "disconnect", "status",
-    "move", "move_up",
+    "move", "move_up", "home",
     "position", "temperature",
     "gcode", "emergency_stop",
 }

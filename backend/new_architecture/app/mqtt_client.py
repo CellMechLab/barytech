@@ -1,3 +1,5 @@
+"""MQTT client for broker subscribe/publish; host and port come from app.config settings."""
+
 import paho.mqtt.client as mqtt
 from app.message_processor import process_message_batches, process_message_batches
 import asyncio
@@ -5,6 +7,7 @@ import app.shared_state
 import time
 import queue
 import orjson
+from app.config import settings
 from app.metrics import record_mqtt_message, record_message_type, record_e2e_latency, update_system_health
 
 mqtt_client = None
@@ -306,13 +309,16 @@ def start_mqtt_client():
     mqtt_client.max_queued_messages_set(10000)
     
     try:
-        # Connect to MQTT broker
-        mqtt_client.connect("localhost", 1883, 60)
+        # Connect to MQTT broker using host/port from .env (see MQTT_HOST, MQTT_PORT)
+        mqtt_client.connect(settings.MQTT_HOST, settings.MQTT_PORT, settings.MQTT_KEEPALIVE)
         
         # Start the MQTT client loop in a separate thread
         mqtt_client.loop_start()
         
-        print("MQTT client started successfully")
+        print(
+            f"MQTT client started successfully "
+            f"({settings.MQTT_HOST}:{settings.MQTT_PORT})"
+        )
         
     except Exception as e:
         print(f"Error starting MQTT client: {e}")
