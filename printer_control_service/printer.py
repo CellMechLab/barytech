@@ -235,33 +235,44 @@ class Printer:
 
     def home(self, axes: Optional[list[str]] = None) -> dict:
         """
-        Home X by jogging toward X_MIN until the GPIO limit switch triggers.
+        Home X axis by jogging in the -X direction, step_mm at a time, until
+        the GPIO limit switch (X_MIN, BCM pin 4) is triggered (pin pulled
+        LOW / grounded).
 
-        Does not send G28 — this machine uses an external limit switch on the Pi
-        (see gpio_manager.LIMIT_SWITCH_PINS) instead of firmware endstop homing.
-        *axes* is accepted for API compatibility but only X is homed via the switch.
+        Does NOT send G28 — homing is done entirely via GPIO feedback.
+
+        Sequence per step:
+            1. Send G1 X-<step_mm> F600  (relative jog toward home end)
+            2. Send M400                 (block until motor physically stops)
+            3. Read GPIO — if X_MIN is LOW (triggered), stop immediately.
+
+        M400 is critical: Marlin's 'ok' for G1 only means the command was
+        enqueued, not that the motor stopped.  Without M400 the planner buffer
+        fills with several steps ahead, and the motor keeps running for
+        multiple steps after GPIO triggers.
+
+        *axes* is accepted for API compatibility but only X is homed.
+
+        Returns a dict with homing result details.
+        Raises RuntimeError if the switch is never triggered within max_steps.
         """
         import gpio_manager
 
-        # GPIO limit switch name for the X minimum end (BCM pin from gpio_manager).
-        switch_name = "X_MIN"
-        # Relative jog size per step while searching for the switch (mm).
-        step_mm = 2.0
-        # Slow feed rate for safe approach to the mechanical limit (mm/min).
-        homing_feed = 600
-        # Maximum jog iterations before giving up (~step_mm * max_steps travel).
-        max_steps = 150
+        switch_name  = "X_MIN"   # GPIO name defined in gpio_manager.LIMIT_SWITCH_PINS
+        step_mm      = 1.0        # jog distance per iteration (mm)
+        homing_feed  = 600        # slow feed rate for safe approach (mm/min)
+        max_steps    = 300        # safety cutoff (~300 mm max travel at 1 mm/step)
 
         if axes:
             requested = [a.upper() for a in axes]
-            if requested != ["X"] and "X" not in requested:
+            if "X" not in requested:
                 logger.warning(
                     "home: only X limit-switch homing is supported; ignoring axes=%s",
                     requested,
                 )
 
         logger.info(
-            "home: limit-switch seek on X  step=%.1f mm  feed=%d  switch=%s",
+            "home: limit-switch seek on +X  step=%.1f mm  feed=%d mm/min  switch=%s",
             step_mm, homing_feed, switch_name,
         )
 
@@ -270,12 +281,13 @@ class Printer:
 
             # Already seated on the switch — nothing to move.
             if gpio_manager.is_triggered(switch_name):
-                logger.info("home: %s already triggered — X at home", switch_name)
+                logger.info("home: %s already triggered — X already at home", switch_name)
                 return {
-                    "method": "limit_switch",
-                    "switch": switch_name,
-                    "reached_switch": True,
-                    "steps": 0,
+                    "method":            "limit_switch",
+                    "switch":            switch_name,
+                    "reached_switch":    True,
+                    "steps":             0,
+                    "distance_mm":       0.0,
                     "already_at_switch": True,
                 }
 
@@ -288,34 +300,44 @@ class Printer:
             self._ser.reset_input_buffer()
             self._send_locked("G91")   # relative mode for repeated jogs
 
-            # Count of G1 jogs sent while seeking the switch.
             steps_taken = 0
             for _ in range(max_steps):
-                if gpio_manager.is_triggered(switch_name):
-                    break
-                # Negative X moves toward X_MIN / the limit switch.
-                self._send_locked(f"G1 X{-step_mm:g} F{homing_feed}")
+                # Jog one step toward the limit switch.
+                self._send_locked(f"G1 X-{step_mm:g} F{homing_feed}")
+
+                # M400 blocks until the planner queue is drained and the motor
+                # has physically stopped.  Without this, Marlin's 'ok' for G1
+                # only means the command was enqueued — the buffer can hold
+                # many moves ahead, so GPIO would be checked while several
+                # queued steps are still executing, causing the late stop.
+                self._send_locked("M400")
                 steps_taken += 1
+
+                # Check limit switch after the move is physically complete.
+                # Pin LOW (grounded) = switch triggered = stop.
                 if gpio_manager.is_triggered(switch_name):
+                    logger.info(
+                        "home: %s triggered after %d step(s) (%.1f mm)",
+                        switch_name, steps_taken, steps_taken * step_mm,
+                    )
                     break
 
-            self._send_locked("M400")  # wait for the last jog to finish
+            # No residual motion remains — M400 was already issued per step.
             self._send_locked("G90")   # restore absolute positioning
 
             if not gpio_manager.is_triggered(switch_name):
                 raise RuntimeError(
                     f"Homing failed: {switch_name} not triggered after "
-                    f"{steps_taken} jog(s) of {step_mm} mm toward X_MIN."
+                    f"{steps_taken} step(s) of {step_mm} mm on +X axis. "
+                    f"Check wiring or increase max_steps."
                 )
 
-            logger.info(
-                "home: %s triggered after %d jog(s)", switch_name, steps_taken
-            )
             return {
-                "method": "limit_switch",
-                "switch": switch_name,
-                "reached_switch": True,
-                "steps": steps_taken,
+                "method":            "limit_switch",
+                "switch":            switch_name,
+                "reached_switch":    True,
+                "steps":             steps_taken,
+                "distance_mm":       round(steps_taken * step_mm, 3),
                 "already_at_switch": False,
             }
 
