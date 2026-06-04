@@ -64,7 +64,7 @@ log = logging.getLogger("printer_pi")
 # Thread pool + printer singleton
 # ---------------------------------------------------------------------------
 
-_executor = ThreadPoolExecutor(max_workers=1)
+_executor = ThreadPoolExecutor(max_workers=4)
 _printer  = Printer()
 
 
@@ -340,7 +340,8 @@ async def _home_axes(axes: list[str]) -> dict:
 # Auto-reconnect loop
 # ---------------------------------------------------------------------------
 
-RECONNECT_INTERVAL = 5.0   # seconds between reconnect attempts
+RECONNECT_INTERVAL = 10.0  # seconds between auto-reconnect attempts
+_printer_connect_lock = asyncio.Lock()
 
 async def _reconnect_loop() -> None:
     """
@@ -363,6 +364,17 @@ async def _reconnect_loop() -> None:
 
         # ── Not connected — try to reconnect ─────────────────────────
         if not now_connected:
+            # Skip if a manual connect request is already in progress.
+            if _printer_connect_lock.locked():
+                log.debug("RECONNECT skipped — manual connect in progress")
+                continue
+            try:
+                # Use wait_for so this attempt does not hold the lock past the
+                # next RECONNECT_INTERVAL — a manual connect can then proceed.
+                await asyncio.wait_for(_printer_connect_lock.acquire(), timeout=5.0)
+            except asyncio.TimeoutError:
+                log.debug("RECONNECT skipped — could not acquire connect lock")
+                continue
             try:
                 log.info("RECONNECT ATTEMPT  port=%s", _printer.config.port)
                 await _run(_printer.connect)
@@ -372,6 +384,8 @@ async def _reconnect_loop() -> None:
             except Exception as exc:
                 log.debug("RECONNECT FAILED  %s", exc)
                 was_connected = False
+            finally:
+                _printer_connect_lock.release()
         else:
             was_connected = True
 
@@ -447,8 +461,28 @@ async def _dispatch(action: str, params: dict) -> dict:
     if action == "connect":
         valid  = set(PrinterConfig.__dataclass_fields__)
         fields = {k: v for k, v in params.items() if k in valid}
-        _printer.config = PrinterConfig(**fields) if fields else PrinterConfig()
-        await _run(_printer.connect)
+
+        # If already connected and no config override requested, return immediately
+        # instead of re-opening the serial port (which blocks for ~2 s + Marlin banner).
+        if _printer.is_connected and not fields:
+            log.info("Serial port already open  port=%s  (skipping re-connect)", _printer.config.port)
+            return {"connected": True, "port": _printer.config.port, "baud_rate": _printer.config.baud_rate}
+
+        # Acquire the connect lock with a generous timeout so we never block a
+        # WebSocket handler indefinitely when the auto-reconnect loop holds the lock.
+        try:
+            await asyncio.wait_for(_printer_connect_lock.acquire(), timeout=25.0)
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                "connect: timed out waiting for printer_connect_lock "
+                "(auto-reconnect loop may be in progress — try again shortly)"
+            )
+        try:
+            _printer.config = PrinterConfig(**fields) if fields else PrinterConfig()
+            await _run(_printer.connect)
+        finally:
+            _printer_connect_lock.release()
+
         log.info("Serial port OPEN  port=%s", _printer.config.port)
         return {"connected": True, "port": _printer.config.port, "baud_rate": _printer.config.baud_rate}
 
