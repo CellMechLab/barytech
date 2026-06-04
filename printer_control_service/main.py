@@ -12,6 +12,10 @@ Movement limits enforced here (soft limits, before any G-code is sent):
     Z :   0 … 275 mm
     E : unlimited
 
+Homing (action "home"):
+    Does not send G28.  Jogs X toward X_MIN in small steps until the GPIO
+    limit switch on BCM pin 4 (gpio_manager) reads triggered (pin LOW).
+
 Z-axis inversion:
     This machine's Z motor is physically inverted.
     G1 Z+N  →  nozzle moves DOWN  (toward bed)
@@ -329,26 +333,36 @@ async def _dispatch(action: str, params: dict) -> dict:
             "feed":           feed,
         }
 
-    # ── Home ─────────────────────────────────────────────────────────────
+    # ── Home (X via GPIO limit switch — no G28) ───────────────────────────
     if action == "home":
-        axes = params.get("axes")   # e.g. ["X", "Y"] or None for all
+        axes = params.get("axes")   # optional; only X is homed via X_MIN switch
 
-        # Check limit switches before homing — abort if any are already triggered,
-        # which could indicate a wiring fault or the axis is already at the endstop.
         switch_states = gpio_manager.read_limit_switches()
-        triggered = {name: state for name, state in switch_states.items() if state}
-        if triggered:
-            msg = (
-                f"Home aborted: limit switch(es) already triggered before homing: "
-                f"{list(triggered.keys())}. Check wiring or clear obstruction."
-            )
-            log.warning("HOME ABORTED  %s", msg)
-            return {"homed": False, "warning": msg, "switches": switch_states}
+        log.info(
+            "HOMING  method=limit_switch  axes=%s  switches=%s",
+            axes or ["X"], switch_states,
+        )
 
-        log.info("HOMING  axes=%s  switches_ok=%s", axes or "ALL", switch_states)
-        await _run(_printer.home, axes)
-        log.info("HOMING COMPLETE")
-        return {"homed": True, "axes": axes or ["X", "Y", "Z"]}
+        try:
+            result = await _run(_printer.home, axes)
+        except RuntimeError as exc:
+            log.warning("HOME FAILED  %s", exc)
+            return {
+                "homed": False,
+                "warning": str(exc),
+                "switches": gpio_manager.read_limit_switches(),
+            }
+
+        log.info("HOMING COMPLETE  %s", result)
+        return {
+            "homed": True,
+            "axes": ["X"],
+            "method": result.get("method", "limit_switch"),
+            "steps": result.get("steps"),
+            "switch": result.get("switch"),
+            "already_at_switch": result.get("already_at_switch", False),
+            "switches": gpio_manager.read_limit_switches(),
+        }
 
     # ── Sensors ──────────────────────────────────────────────────────────
 

@@ -233,17 +233,91 @@ class Printer:
 
         logger.info("move: axis=%s complete", axis)
 
-    def home(self, axes: Optional[list[str]] = None) -> None:
+    def home(self, axes: Optional[list[str]] = None) -> dict:
         """
-        Home axes.  Pass None or an empty list to home all axes.
-        Pass e.g. ['X', 'Z'] to home specific axes.
+        Home X by jogging toward X_MIN until the GPIO limit switch triggers.
+
+        Does not send G28 — this machine uses an external limit switch on the Pi
+        (see gpio_manager.LIMIT_SWITCH_PINS) instead of firmware endstop homing.
+        *axes* is accepted for API compatibility but only X is homed via the switch.
         """
-        axes_str = " ".join(a.upper() for a in axes) if axes else ""
-        cmd = f"G28 {axes_str}".strip()
-        logger.info("home: %s", cmd)
+        import gpio_manager
+
+        # GPIO limit switch name for the X minimum end (BCM pin from gpio_manager).
+        switch_name = "X_MIN"
+        # Relative jog size per step while searching for the switch (mm).
+        step_mm = 2.0
+        # Slow feed rate for safe approach to the mechanical limit (mm/min).
+        homing_feed = 600
+        # Maximum jog iterations before giving up (~step_mm * max_steps travel).
+        max_steps = 150
+
+        if axes:
+            requested = [a.upper() for a in axes]
+            if requested != ["X"] and "X" not in requested:
+                logger.warning(
+                    "home: only X limit-switch homing is supported; ignoring axes=%s",
+                    requested,
+                )
+
+        logger.info(
+            "home: limit-switch seek on X  step=%.1f mm  feed=%d  switch=%s",
+            step_mm, homing_feed, switch_name,
+        )
+
         with self._lock:
             self._require_connected()
-            self._send_locked(cmd, timeout=120)
+
+            # Already seated on the switch — nothing to move.
+            if gpio_manager.is_triggered(switch_name):
+                logger.info("home: %s already triggered — X at home", switch_name)
+                return {
+                    "method": "limit_switch",
+                    "switch": switch_name,
+                    "reached_switch": True,
+                    "steps": 0,
+                    "already_at_switch": True,
+                }
+
+            if not gpio_manager.gpio_available():
+                raise RuntimeError(
+                    "GPIO not available — cannot home via limit switch. "
+                    "Check RPi.GPIO wiring on the Pi."
+                )
+
+            self._ser.reset_input_buffer()
+            self._send_locked("G91")   # relative mode for repeated jogs
+
+            # Count of G1 jogs sent while seeking the switch.
+            steps_taken = 0
+            for _ in range(max_steps):
+                if gpio_manager.is_triggered(switch_name):
+                    break
+                # Negative X moves toward X_MIN / the limit switch.
+                self._send_locked(f"G1 X{-step_mm:g} F{homing_feed}")
+                steps_taken += 1
+                if gpio_manager.is_triggered(switch_name):
+                    break
+
+            self._send_locked("M400")  # wait for the last jog to finish
+            self._send_locked("G90")   # restore absolute positioning
+
+            if not gpio_manager.is_triggered(switch_name):
+                raise RuntimeError(
+                    f"Homing failed: {switch_name} not triggered after "
+                    f"{steps_taken} jog(s) of {step_mm} mm toward X_MIN."
+                )
+
+            logger.info(
+                "home: %s triggered after %d jog(s)", switch_name, steps_taken
+            )
+            return {
+                "method": "limit_switch",
+                "switch": switch_name,
+                "reached_switch": True,
+                "steps": steps_taken,
+                "already_at_switch": False,
+            }
 
     def emergency_stop(self) -> None:
         """Send M112 (firmware emergency stop — requires printer reset)."""
