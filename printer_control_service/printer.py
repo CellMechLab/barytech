@@ -42,7 +42,8 @@ class PrinterTimeoutError(RuntimeError):
 class PrinterConfig:
     port: str = "/dev/ttyACM0"
     baud_rate: int = 230400
-    timeout: float = 5.0
+    timeout: float = 5.0        # serial read timeout for status queries (M114, M105)
+    move_timeout: float = 60.0  # max seconds to wait for a single G1+M400 move to complete
     # Feed rates (mm/min)
     feed_xy: int = 3000
     feed_z: int = 1000
@@ -221,15 +222,11 @@ class Printer:
 
         with self._lock:
             self._require_connected()
-            # Flush once before the sequence to clear any unsolicited Marlin
-            # reports (e.g. temperature auto-reports) that arrived since the
-            # last command.  Must NOT be repeated between commands — see
-            # _send_locked docstring.
             self._ser.reset_input_buffer()
-            self._send_locked("G91")                          # relative mode
-            self._send_locked(f"G1 {axis}{distance:+g} F{feed}")
-            self._send_locked("M400")                         # wait for moves
-            self._send_locked("G90")                          # absolute mode
+            self._send_locked("G91")                                        # relative mode
+            self._send_locked(f"G1 {axis}{distance:+g} F{feed}")           # start move
+            self._send_locked("M400", timeout=self.config.move_timeout)    # wait for move to finish
+            self._send_locked("G90")                                        # absolute mode
 
         logger.info("move: axis=%s complete", axis)
 

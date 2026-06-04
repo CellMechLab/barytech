@@ -64,13 +64,31 @@ log = logging.getLogger("printer_pi")
 # Thread pool + printer singleton
 # ---------------------------------------------------------------------------
 
-_executor = ThreadPoolExecutor(max_workers=4)
+# Two separate thread pools so fast status queries (M114/M105/status) are
+# never blocked behind a slow motion command (G1 + M400 can take many seconds).
+#
+#   _motion_executor  — max_workers=1  — serialises G-code motion commands
+#                        (move, home, gcode, emergency_stop, connect/disconnect)
+#   _query_executor   — max_workers=1  — handles lightweight read-only queries
+#                        (status, position, temperature, limit_switches)
+#
+# All serial I/O still goes through Printer._lock so the two threads cannot
+# interleave bytes on the same serial port — a query will wait the few
+# milliseconds until the motion command releases the lock.
+_motion_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="motion")
+_query_executor  = ThreadPoolExecutor(max_workers=1, thread_name_prefix="query")
 _printer  = Printer()
 
 
-async def _run(fn, *args):
+async def _run(fn, *args, motion: bool = False):
+    """Run a blocking printer call in the appropriate executor.
+
+    Pass motion=True for commands that drive the motors (move, home, gcode,
+    connect) so they never starve lightweight status / position queries.
+    """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_executor, fn, *args)
+    executor = _motion_executor if motion else _query_executor
+    return await loop.run_in_executor(executor, fn, *args)
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +180,7 @@ async def _limit_switch_watcher() -> None:
                 # Send quickstop to firmware
                 if _printer.is_connected:
                     try:
-                        await _run(_printer.send_gcode, "M410")
+                        await _run(_printer.send_gcode, "M410", motion=True)
                         log.warning("M410 quickstop sent")
                     except Exception as exc:
                         log.error("Failed to send M410: %s", exc)
@@ -287,7 +305,7 @@ async def _home_single_axis(axis: str) -> dict:
     # If already triggered at the start, back off first so we get a clean edge
     if is_triggered(switch_name):
         log.info("HOMING  switch already triggered — backing off 5 mm first")
-        await _run(_printer.move, axis, +5.0, feed)
+        await _run(_printer.move, axis, +5.0, feed, motion=True)
         await asyncio.sleep(0.1)
 
     # Drive toward the switch in small steps, polling GPIO after each move
@@ -299,7 +317,7 @@ async def _home_single_axis(axis: str) -> dict:
             )
 
         log.debug("HOMING STEP  axis=%s  traveled=%.1f mm", axis, total_travel)
-        await _run(_printer.move, axis, -HOMING_STEP_MM, feed)
+        await _run(_printer.move, axis, -HOMING_STEP_MM, feed, motion=True)
         total_travel += HOMING_STEP_MM
 
         # Small yield so the event loop stays alive
@@ -341,6 +359,9 @@ async def _home_axes(axes: list[str]) -> dict:
 # ---------------------------------------------------------------------------
 
 RECONNECT_INTERVAL = 10.0  # seconds between auto-reconnect attempts
+
+# Prevents the auto-reconnect loop and a manual connect request from racing
+# on the single-worker executor at the same time.
 _printer_connect_lock = asyncio.Lock()
 
 async def _reconnect_loop() -> None:
@@ -369,23 +390,15 @@ async def _reconnect_loop() -> None:
                 log.debug("RECONNECT skipped — manual connect in progress")
                 continue
             try:
-                # Use wait_for so this attempt does not hold the lock past the
-                # next RECONNECT_INTERVAL — a manual connect can then proceed.
-                await asyncio.wait_for(_printer_connect_lock.acquire(), timeout=5.0)
-            except asyncio.TimeoutError:
-                log.debug("RECONNECT skipped — could not acquire connect lock")
-                continue
-            try:
-                log.info("RECONNECT ATTEMPT  port=%s", _printer.config.port)
-                await _run(_printer.connect)
+                async with _printer_connect_lock:
+                    log.info("RECONNECT ATTEMPT  port=%s", _printer.config.port)
+                    await _run(_printer.connect, motion=True)
                 log.info("RECONNECT SUCCESS  port=%s", _printer.config.port)
                 await _push_event({"type": "printer_connected", "port": _printer.config.port})
                 was_connected = True
             except Exception as exc:
                 log.debug("RECONNECT FAILED  %s", exc)
                 was_connected = False
-            finally:
-                _printer_connect_lock.release()
         else:
             was_connected = True
 
@@ -408,7 +421,8 @@ async def lifespan(app: FastAPI):
         _printer.disconnect()
         log.info("Serial port closed.")
     cleanup_gpio()
-    _executor.shutdown(wait=False)
+    _motion_executor.shutdown(wait=False)
+    _query_executor.shutdown(wait=False)
 
 
 # ---------------------------------------------------------------------------
@@ -461,33 +475,15 @@ async def _dispatch(action: str, params: dict) -> dict:
     if action == "connect":
         valid  = set(PrinterConfig.__dataclass_fields__)
         fields = {k: v for k, v in params.items() if k in valid}
-
-        # If already connected and no config override requested, return immediately
-        # instead of re-opening the serial port (which blocks for ~2 s + Marlin banner).
-        if _printer.is_connected and not fields:
-            log.info("Serial port already open  port=%s  (skipping re-connect)", _printer.config.port)
-            return {"connected": True, "port": _printer.config.port, "baud_rate": _printer.config.baud_rate}
-
-        # Acquire the connect lock with a generous timeout so we never block a
-        # WebSocket handler indefinitely when the auto-reconnect loop holds the lock.
-        try:
-            await asyncio.wait_for(_printer_connect_lock.acquire(), timeout=25.0)
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                "connect: timed out waiting for printer_connect_lock "
-                "(auto-reconnect loop may be in progress — try again shortly)"
-            )
-        try:
+        # Hold the lock so the auto-reconnect loop cannot race with this request.
+        async with _printer_connect_lock:
             _printer.config = PrinterConfig(**fields) if fields else PrinterConfig()
-            await _run(_printer.connect)
-        finally:
-            _printer_connect_lock.release()
-
+            await _run(_printer.connect, motion=True)
         log.info("Serial port OPEN  port=%s", _printer.config.port)
         return {"connected": True, "port": _printer.config.port, "baud_rate": _printer.config.baud_rate}
 
     if action == "disconnect":
-        await _run(_printer.disconnect)
+        await _run(_printer.disconnect, motion=True)
         return {"connected": False}
 
     if action == "status":
@@ -531,7 +527,7 @@ async def _dispatch(action: str, params: dict) -> dict:
             return {"moved": False, "warning": warning}
 
         eff_feed = feed or _printer._default_feed(axis)
-        await _run(_printer.move, axis, firmware_delta, feed)
+        await _run(_printer.move, axis, firmware_delta, feed, motion=True)
 
         _soft_position[axis] = round(current + firmware_delta, 3)
         log.info("MOVE COMPLETE  axis=%s  soft_pos=%.3f", axis, _soft_position[axis])
@@ -561,7 +557,7 @@ async def _dispatch(action: str, params: dict) -> dict:
         if not ok:
             return {"moved": False, "warning": warning}
 
-        await _run(_printer.move, "Z", firmware_delta, feed)
+        await _run(_printer.move, "Z", firmware_delta, feed, motion=True)
         _soft_position["Z"] = round(current_z + firmware_delta, 3)
 
         return {
@@ -614,12 +610,12 @@ async def _dispatch(action: str, params: dict) -> dict:
     if action == "gcode":
         command = str(params["command"])
         timeout = params.get("timeout")
-        lines   = await _run(_printer.send_gcode, command, timeout)
+        lines   = await _run(_printer.send_gcode, command, timeout, motion=True)
         return {"command": command, "response": lines}
 
     if action == "emergency_stop":
         log.critical("EMERGENCY STOP — M112")
-        await _run(_printer.emergency_stop)
+        await _run(_printer.emergency_stop, motion=True)
         return {"stopped": True}
 
     if action == "printer_status":
