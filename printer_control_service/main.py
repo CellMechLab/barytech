@@ -134,6 +134,16 @@ def _limits_check(axis: str, current_mm: float, delta_mm: float) -> tuple[bool, 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("=== Printer service starting ===")
+    try:
+        log.info("Auto-connecting serial port %s @ %d baud …",
+                 _printer.config.port, _printer.config.baud_rate)
+        await _run(_printer.connect)
+        log.info("Serial port OPEN  port=%s", _printer.config.port)
+    except Exception as exc:
+        log.warning(
+            "Auto-connect failed — printer may not be attached yet. "
+            "Use the Connect button to retry.  Reason: %s", exc
+        )
     yield
     log.info("=== Printer service shutting down ===")
     if _printer.is_connected:
