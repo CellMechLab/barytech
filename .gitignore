@@ -26,8 +26,6 @@ venv/
 .venv/
 env/
 ENV/
-# Backup virtual environments (e.g. venv_py39_backup_20260508/)
-venv_*/
 
 # IDE
 .vscode/
