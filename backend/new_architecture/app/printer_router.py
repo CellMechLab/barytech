@@ -415,13 +415,13 @@ async def move_up(body: dict = Body(default={})):
     return JSONResponse(content=data)
 
 
-# @router.post("/home", summary="Home axes (omit body to home all)")
-# async def home(body: dict = Body(default={})):
-#     """
-#     Body: { "axes": ["X", "Y"] }  —  omit or pass {} to home all axes.
-#     """
-#     data = await _ws_client.call("home", body, timeout=180.0)
-#     return JSONResponse(content=data)
+@router.post("/home", summary="Home axes (omit body to home all)")
+async def home(body: dict = Body(default={})):
+    """
+    Body: { "axes": ["X", "Y"] }  —  omit or pass {} to home all axes.
+    """
+    data = await _ws_client.call("home", body, timeout=180.0)
+    return JSONResponse(content=data)
 
 
 @router.get("/position", summary="Query current XYZ E position (M114)")
