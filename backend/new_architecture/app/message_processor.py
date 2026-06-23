@@ -380,21 +380,38 @@ async def broadcast_messages(device_id: str):
             total_messages_sent_to_frontend += len(batch)  # Update the accumulator
             print(f"[STATS] Total messages sent to frontend: {total_messages_sent_to_frontend}")
             
-            # Send only to the target frontend
-            websockets = websocket_connections.get(target_frontend, set())
-            print(f"[CHECK] Checking websockets for frontend-{target_frontend}: {len(websockets)} connections")
-            if websockets:
+            # Prefer the configured frontend mapping, but fall back to every connected
+            # client so telemetry is not stranded when login/user ids differ.
+            target_clients = [target_frontend]
+            if not websocket_connections.get(target_frontend):
+                target_clients = [
+                    client_id
+                    for client_id, connections in websocket_connections.items()
+                    if connections
+                ]
+
+            total_connections = sum(
+                len(websocket_connections.get(client_id, set()))
+                for client_id in target_clients
+            )
+            print(
+                f"[CHECK] Sending telemetry from {device_id} to clients "
+                f"{target_clients}: {total_connections} connections"
+            )
+
+            if total_connections:
                 try:
-                    await send_to_connected_clients_optimized(target_frontend, batch)
+                    for client_id in target_clients:
+                        await send_to_connected_clients_optimized(client_id, batch)
                     # MONITORING: Count successful broadcasts
                     processing_counters.broadcast_sent += len(batch)
-                    print(f"[OK] Successfully sent {len(batch)} messages to frontend-{target_frontend}")
+                    print(f"[OK] Successfully sent {len(batch)} messages")
                 except Exception as e:
                     # MONITORING: Count broadcast errors
                     processing_counters.broadcast_errors += len(batch)
-                    print(f"[ERROR] Error sending to frontend-{target_frontend}: {e}")
+                    print(f"[ERROR] Error sending telemetry: {e}")
             else:
-                print(f"[WARNING] No WebSocket connections found for frontend-{target_frontend}")
+                print("[WARNING] No WebSocket connections found for telemetry")
         else:
             # No messages collected in this cycle, sleep briefly to reduce CPU usage
             await asyncio.sleep(0.005)  # Reduced sleep time

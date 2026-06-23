@@ -21,6 +21,9 @@ const usePrinterControls = (backendApiUrl = BACKEND_BASE_URL) => {
     printerPosition,
     bedTemperature,
     hotendTemperature,
+    indentationStatus,
+    markIndentationRequested,
+    markIndentationRequestFailed,
   } = useContext(WebSocketContext);
 
   // Tracks whether a printer command HTTP request is currently in-flight.
@@ -68,10 +71,12 @@ const usePrinterControls = (backendApiUrl = BACKEND_BASE_URL) => {
 
       // Reflect successful command completion in the status card.
       setPrinterActionStatus(successMessage);
+      return true;
     } catch (error) {
       // Prevent UI silence when the printer backend is unreachable or returns an error.
       setPrinterActionStatus("Command failed");
       console.error("Printer command error:", error);
+      return false;
     } finally {
       // Re-enable quick-control buttons after the request settles.
       setPrinterActionInProgress(false);
@@ -128,7 +133,16 @@ const usePrinterControls = (backendApiUrl = BACKEND_BASE_URL) => {
 
   // Sends the start-indentation command to trigger an automated indentation test sequence.
   const handleStartIndentation = async () => {
-    await sendPrinterCommand("/printer/indentation/start", {}, "Indentation started");
+    markIndentationRequested();
+    const started = await sendPrinterCommand(
+      "/printer/indentation/start",
+      {},
+      "Indentation started"
+    );
+
+    if (!started) {
+      markIndentationRequestFailed();
+    }
   };
 
   // ─── Connection commands ──────────────────────────────────────────────────
@@ -152,6 +166,7 @@ const usePrinterControls = (backendApiUrl = BACKEND_BASE_URL) => {
     printerPosition,
     bedTemperature,
     hotendTemperature,
+    indentationStatus,
     jogStep,
     setJogStep,
     printerConnected,

@@ -2,6 +2,7 @@ import paho.mqtt.client as mqtt
 from app.message_processor import process_message_batches, process_message_batches
 import asyncio
 import app.shared_state
+import os
 import time
 import queue
 import orjson
@@ -17,6 +18,63 @@ last_rate_check = time.time()
 
 # Thread-safe queue for messages from MQTT thread to async event loop
 message_queue = queue.Queue(maxsize=0)  # Unbounded, thread-safe queue
+
+DEFAULT_FRONTEND_DEVICE_ID = os.getenv("DEFAULT_FRONTEND_DEVICE_ID", "frontend1_device")
+
+def first_defined_value(source, keys):
+    for key in keys:
+        value = source.get(key)
+        if value is not None:
+            return value
+    return None
+
+def to_float_or_none(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number
+
+def normalize_data_point(data_point):
+    """Return a canonical telemetry payload, or None for non-telemetry messages."""
+    if not isinstance(data_point, dict):
+        return None
+
+    state = data_point.get("state") if isinstance(data_point.get("state"), dict) else {}
+    position = data_point.get("position") if isinstance(data_point.get("position"), dict) else {}
+
+    device_id = (
+        first_defined_value(data_point, ["device_id", "deviceId", "device", "id"])
+        or first_defined_value(state, ["device_id", "deviceId", "device", "id"])
+    )
+    displacement = to_float_or_none(
+        first_defined_value(data_point, ["displacement", "displacement_mm", "z", "Z", "z_mm", "Z_mm"])
+        if first_defined_value(data_point, ["displacement", "displacement_mm", "z", "Z", "z_mm", "Z_mm"]) is not None
+        else (
+            first_defined_value(state, ["displacement", "displacement_mm", "z", "Z", "z_mm", "Z_mm"])
+            if first_defined_value(state, ["displacement", "displacement_mm", "z", "Z", "z_mm", "Z_mm"]) is not None
+            else first_defined_value(position, ["z", "Z"])
+        )
+    )
+    force = to_float_or_none(
+        first_defined_value(data_point, ["force", "Force", "force_mN", "force_N", "force_n", "Force_mN", "Force_N"])
+        if first_defined_value(data_point, ["force", "Force", "force_mN", "force_N", "force_n", "Force_mN", "Force_N"]) is not None
+        else first_defined_value(state, ["force", "Force", "force_mN", "force_N", "force_n", "Force_mN", "Force_N"])
+    )
+
+    if displacement is None and force is None:
+        return None
+
+    normalized = dict(data_point)
+    normalized["device_id"] = str(device_id or DEFAULT_FRONTEND_DEVICE_ID)
+    normalized["timestamp"] = first_defined_value(data_point, ["timestamp", "time", "t"]) or first_defined_value(state, ["timestamp", "time", "t"]) or datetime_utc_iso()
+    normalized["displacement"] = displacement
+    normalized["force"] = force
+    return normalized
+
+def datetime_utc_iso():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 # Monitoring counters for each stage
 class MessageCounters:
@@ -186,28 +244,25 @@ async def process_raw_message_batch(raw_messages: list):
                 message_content = orjson.loads(raw_payload)
                 parsed_count += 1
                 
+                is_batched = isinstance(message_content, list)
+                data_points = message_content if is_batched else [message_content]
+
                 # PROMETHEUS: Record message type
-                if isinstance(message_content, list):
-                    # This is a batched message from optimized publishers
-                    batch_size = len(message_content)
-                    print(f"Processing batched message with {batch_size} data points")
-                    record_message_type(is_batched=True, batch_size=batch_size)
-                    
-                    # Process all data points in the batch
-                    for data_point in message_content:
-                        device_id = data_point.get("device_id")
-                        if device_id:
-                            if device_id not in device_messages:
-                                device_messages[device_id] = []
-                            device_messages[device_id].append(data_point)
+                if is_batched:
+                    print(f"Processing batched message with {len(data_points)} data points")
+                    record_message_type(is_batched=True, batch_size=len(data_points))
                 else:
-                    # This is a single message (legacy format)
                     record_message_type(is_batched=False)
-                    device_id = message_content.get("device_id")
-                    if device_id:
-                        if device_id not in device_messages:
-                            device_messages[device_id] = []
-                        device_messages[device_id].append(message_content)
+
+                for data_point in data_points:
+                    normalized_point = normalize_data_point(data_point)
+                    if not normalized_point:
+                        continue
+
+                    device_id = normalized_point["device_id"]
+                    if device_id not in device_messages:
+                        device_messages[device_id] = []
+                    device_messages[device_id].append(normalized_point)
                     
             except Exception as e:
                 error_count += 1

@@ -4,6 +4,8 @@ import { useTheme } from '@mui/material';
 import { tokens } from '../../theme';
 import { WebSocketContext } from './WebSocketProvider';
 
+const FORCE_UNIT = process.env.REACT_APP_FORCE_UNIT || "N";
+
 const DataDisplay = () => {
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
@@ -25,7 +27,7 @@ const DataDisplay = () => {
               Data 1: {data.displacement}
             </Typography>
             <Typography color={colors.grey[100]}>
-              Data 2: {data.data2}
+              Data 2: {data.force} {FORCE_UNIT}
             </Typography>
           </Box>
           <Box color={colors.grey[100]}>{new Date().toLocaleDateString()}</Box>

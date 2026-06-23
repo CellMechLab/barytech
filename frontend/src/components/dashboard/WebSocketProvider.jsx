@@ -1,5 +1,5 @@
 // Provides shared live data-stream and printer-status WebSocket state to the dashboard layout.
-import React, { createContext, useEffect, useState } from "react";
+import React, { createContext, useEffect, useRef, useState } from "react";
 import { Toaster, toast } from "sonner"; // Import Sonner's Toaster and toast
 import { useUser } from "../../context/UserContext"; // Import your UserContext
 import pako from "pako"; // Import pako for decompression
@@ -9,6 +9,13 @@ import { buildWebSocketUrl } from "../../config/endpoints";
 // Create a WebSocket context
 export const WebSocketContext = createContext(null);
 
+const MAX_DATA_BUFFER_POINTS = Number(
+  process.env.REACT_APP_MAX_DATA_BUFFER_POINTS || 5000
+);
+const DATA_BUFFER_FLUSH_INTERVAL_MS = Number(
+  process.env.REACT_APP_DATA_BUFFER_FLUSH_INTERVAL_MS || 100
+);
+
 // Provider component
 export const WebSocketProvider = ({ children }) => {
   const { user } = useUser(); // Get the login function from UserContext
@@ -16,6 +23,8 @@ export const WebSocketProvider = ({ children }) => {
   const [socket, setSocket] = useState(null);
   const [dataBuffer, setDataBuffer] = useState([]); // State to hold received data
   const [dataBuffer1, setDataBuffer1] = useState([]); // State to hold received data
+  const pendingDataMessages = useRef([]);
+  const dataBufferFlushTimeout = useRef(null);
   const [connected, setConnected] = useState(false);
   // Tracks whether the shared printer-status WebSocket is currently open.
   const [printerSocketConnected, setPrinterSocketConnected] = useState(false);
@@ -25,14 +34,47 @@ export const WebSocketProvider = ({ children }) => {
   const [bedTemperature, setBedTemperature] = useState(null);
   // Stores the latest hotend temperature reported by the printer-status stream.
   const [hotendTemperature, setHotendTemperature] = useState(null);
+  const [indentationStatus, setIndentationStatus] = useState("Waiting for indentation");
+  const previousIndentationState = useRef(null);
+  const markIndentationRequested = () => {
+    setIndentationStatus("Starting indentation... Waiting for device response.");
+  };
+  const markIndentationRequestFailed = () => {
+    setIndentationStatus("Unable to start indentation. Check the printer connection and try again.");
+  };
+  const queueDataBufferUpdate = (messages) => {
+    pendingDataMessages.current.push(...messages);
+
+    if (dataBufferFlushTimeout.current !== null) {
+      return;
+    }
+
+    dataBufferFlushTimeout.current = window.setTimeout(() => {
+      const queuedMessages = pendingDataMessages.current;
+      pendingDataMessages.current = [];
+      dataBufferFlushTimeout.current = null;
+
+      setDataBuffer((prev) =>
+        [...prev, ...queuedMessages].slice(-MAX_DATA_BUFFER_POINTS)
+      );
+    }, DATA_BUFFER_FLUSH_INTERVAL_MS);
+  };
   useEffect(() => {
     if (!user) {
       setDataBuffer([]); // Reset when user is null
+      pendingDataMessages.current = [];
+
+      if (dataBufferFlushTimeout.current !== null) {
+        window.clearTimeout(dataBufferFlushTimeout.current);
+        dataBufferFlushTimeout.current = null;
+      }
+
+      setIndentationStatus("Waiting for indentation");
+      previousIndentationState.current = null;
     }
   }, [user]);
-  // Accumulators for tracking received points
-  const [batchCount, setBatchCount] = useState(0); // Points in the current batch
-  const [totalPoints, setTotalPoints] = useState(0); // Total points received
+  // Tracks received points without triggering an extra React render per batch.
+  const totalPoints = useRef(0);
 
   useEffect(() => {
     if (!user) {
@@ -123,6 +165,9 @@ export const WebSocketProvider = ({ children }) => {
   }, [user]);
 
   const connectWebSocket = () => {
+    setIndentationStatus("Waiting for indentation");
+    previousIndentationState.current = null;
+
     const newSocket = new WebSocket(buildWebSocketUrl("/ws"));
     const client_id = user.user_id; // Define the client ID
 
@@ -141,8 +186,6 @@ export const WebSocketProvider = ({ children }) => {
         
         // Handle binary data (Blob)
         if (event.data instanceof Blob) {
-          console.log("Received binary data (Blob), size:", event.data.size);
-          
           // Convert Blob to ArrayBuffer
           const arrayBuffer = await event.data.arrayBuffer();
           const uint8Array = new Uint8Array(arrayBuffer);
@@ -152,14 +195,11 @@ export const WebSocketProvider = ({ children }) => {
             const textDecoder = new TextDecoder('utf-8');
             const jsonString = textDecoder.decode(uint8Array);
             parsedBatch = JSON.parse(jsonString);
-            console.log("Successfully parsed uncompressed binary data");
           } catch (uncompressedError) {
             // If that fails, try to decompress with pako
             try {
-              console.log("Attempting to decompress binary data with pako...");
               const decompressed = pako.inflate(uint8Array, { to: 'string' });
               parsedBatch = JSON.parse(decompressed);
-              console.log("Successfully decompressed and parsed binary data");
             } catch (decompressError) {
               console.error("Error decompressing binary data:", decompressError);
               throw new Error(`Failed to parse both uncompressed and compressed data: ${uncompressedError.message} | ${decompressError.message}`);
@@ -168,12 +208,10 @@ export const WebSocketProvider = ({ children }) => {
         } 
         // Handle text data (fallback for non-binary messages)
         else if (typeof event.data === 'string') {
-          console.log("Received text data, length:", event.data.length);
           parsedBatch = JSON.parse(event.data);
         }
         // Handle ArrayBuffer directly
         else if (event.data instanceof ArrayBuffer) {
-          console.log("Received ArrayBuffer, size:", event.data.byteLength);
           const uint8Array = new Uint8Array(event.data);
           const textDecoder = new TextDecoder('utf-8');
           const jsonString = textDecoder.decode(uint8Array);
@@ -183,12 +221,36 @@ export const WebSocketProvider = ({ children }) => {
           throw new Error(`Unsupported data type: ${typeof event.data}`);
         }
 
-        // Update state with parsed data
-        setBatchCount(parsedBatch.length);
-        setTotalPoints((prevTotal) => prevTotal + parsedBatch.length);
-        setDataBuffer((prev) => [...prev, ...parsedBatch]);
-        
-        console.log(`Parsed batch of ${parsedBatch.length} messages`);
+        const parsedMessages = Array.isArray(parsedBatch) ? parsedBatch : [parsedBatch];
+
+        let nextIndentationStatus = null;
+        parsedMessages.forEach((message) => {
+          if (!message || message.state == null || message.state === "") {
+            return;
+          }
+
+          const currentState = Number(message.state);
+
+          if (currentState !== 0 && currentState !== 1) {
+            return;
+          }
+
+          if (currentState === 1) {
+            nextIndentationStatus = "Indentation in progress...";
+          } else if (previousIndentationState.current === 1) {
+            nextIndentationStatus = "Indentation completed. Ready for the next test.";
+          }
+
+          previousIndentationState.current = currentState;
+        });
+
+        if (nextIndentationStatus) {
+          setIndentationStatus(nextIndentationStatus);
+        }
+
+        // Store the backend payload exactly as received; chart components choose what to plot.
+        totalPoints.current += parsedMessages.length;
+        queueDataBufferUpdate(parsedMessages);
         
       } catch (error) {
         console.error("Error parsing message batch:", error);
@@ -239,18 +301,15 @@ export const WebSocketProvider = ({ children }) => {
 
   useEffect(() => {
     return () => {
+      if (dataBufferFlushTimeout.current !== null) {
+        window.clearTimeout(dataBufferFlushTimeout.current);
+      }
+
       if (socket) {
         socket.close(); // Close the socket on cleanup
       }
     };
   }, [socket]); // Run effect only on mount and unmount
-
-  useEffect(() => {
-    if (batchCount > 0) {
-      console.log(`Points received in the last batch: ${batchCount}`);
-      console.log(`Total points received so far: ${totalPoints}`);
-    }
-  }, [batchCount, totalPoints]); // Log whenever batchCount or totalPoints changes
 
   return (
     <WebSocketContext.Provider
@@ -266,6 +325,9 @@ export const WebSocketProvider = ({ children }) => {
         printerPosition,
         bedTemperature,
         hotendTemperature,
+        indentationStatus,
+        markIndentationRequested,
+        markIndentationRequestFailed,
       }}
     >
       <Toaster position="bottom-right" /> {/* Add the Toaster component */}

@@ -13,7 +13,7 @@ import Header from "./Header";
 import LineChart from "./LineChart";
 import StatBox from "./StatBox";
 import ControlButton from "./ControlButton";
-import { useState, useCallback, useRef, useContext, useEffect } from "react";
+import { useState, useCallback, useRef, useContext, useEffect, useMemo } from "react";
 import DraggableBox from "./DraggableBox";
 import { WebSocketContext } from "./WebSocketProvider";
 import usePrinterControls from "./hooks/usePrinterControls";
@@ -37,6 +37,7 @@ import FileUploadIcon from "@mui/icons-material/FileUpload";
 import SaveAltIcon from "@mui/icons-material/SaveAlt";
 import { BACKEND_BASE_URL, VIDEO_BASE_URL } from "../../config/endpoints";
 
+const FORCE_UNIT = process.env.REACT_APP_FORCE_UNIT || "N";
 const Dashboard = () => {
   const backendApiUrl = BACKEND_BASE_URL;
   const theme = useTheme();
@@ -53,6 +54,7 @@ const Dashboard = () => {
     printerPosition,
     bedTemperature,
     hotendTemperature,
+    indentationStatus,
     jogStep,
     setJogStep,
     printerConnected,
@@ -182,31 +184,56 @@ const Dashboard = () => {
   // Controls whether the Camera View card shows manual jog controls or automatic mode.
   const [cameraMode, setCameraMode] = useState("manual");
 
-  const [transformedData, setTransformedData] = useState({ series1: [], series2: [] });
-  const [series1Data, setSeries1Data] = useState([]);
-  const [series2Data, setSeries2Data] = useState([]);
+  const dashboardData = useMemo(() => {
+    let displacementTotal = 0;
+    let displacementCount = 0;
+    let forceTotal = 0;
+    let forceCount = 0;
 
-  useEffect(() => {
-    if (chartRef.current) {
-      const data = chartRef.current.transformData(dataBuffer);
-      setTransformedData(data);
-    }
+    dataBuffer.forEach((item) => {
+      const displacement = Number(item.displacement);
+      const force = Number(item.force);
+
+      if (item.displacement != null && Number.isFinite(displacement)) {
+        displacementTotal += displacement;
+        displacementCount += 1;
+      }
+
+      if (item.force != null && Number.isFinite(force)) {
+        forceTotal += force;
+        forceCount += 1;
+      }
+    });
+
+    const recentData = dataBuffer;
+    const toChartDate = (item, index) => {
+      const timestamp = item.timestamp_ms ?? item.timestamp ?? item.time ?? item.t;
+      const numericTimestamp = Number(timestamp);
+      const date = Number.isFinite(numericTimestamp)
+        ? new Date(Math.abs(numericTimestamp) > 1e12 ? numericTimestamp : numericTimestamp * 1000)
+        : new Date(timestamp);
+
+      return Number.isFinite(date.getTime()) ? date : new Date(index);
+    };
+
+    return {
+      displacementAvg:
+        displacementCount > 0 ? displacementTotal / displacementCount : null,
+      forceAvg: forceCount > 0 ? forceTotal / forceCount : null,
+      displacementSeries: recentData.flatMap((item, index) => {
+        const value = Number(item.displacement);
+        return item.displacement != null && Number.isFinite(value)
+          ? [{ date: toChartDate(item, index), value }]
+          : [];
+      }),
+      forceSeries: recentData.flatMap((item, index) => {
+        const value = Number(item.force);
+        return item.force != null && Number.isFinite(value)
+          ? [{ date: toChartDate(item, index), value }]
+          : [];
+      }),
+    };
   }, [dataBuffer]);
-
-  useEffect(() => {
-    setSeries1Data(transformedData.series1 || []);
-    setSeries2Data(transformedData.series2 || []);
-  }, [transformedData]);
-
-  useEffect(() => {
-    setBoxes((prevBoxes) =>
-      prevBoxes.map((box) => {
-        if (box.id === 3) return { ...box, data: transformedData.series1 };
-        if (box.id === 4) return { ...box, data: transformedData.series2 };
-        return box;
-      })
-    );
-  }, [transformedData]);
 
   const chartRef = useRef();
   const handleDownload = () => {
@@ -296,7 +323,7 @@ const Dashboard = () => {
       gridRow: "span 1",
       lineColor: "#009688",
       areaColor: "rgba(0,150,136,0.2)",
-      data: transformedData.series1 || [],
+      data: [],
     },
     {
       id: 4,
@@ -304,14 +331,14 @@ const Dashboard = () => {
         <StatBox
           measurementColor="#D35400"
           title="Force Avg"
-          subtitle="— N"
+          subtitle={`— ${FORCE_UNIT}`}
         />
       ),
       gridColumn: "span 6",
       gridRow: "span 1",
       lineColor: "#FF9800",
       areaColor: "rgba(255,152,0,0.2)",
-      data: transformedData.series1 || [],
+      data: [],
     },
   ]);
 
@@ -487,9 +514,8 @@ const Dashboard = () => {
                     >
                       ▶ Start Indentation
                     </Button>
-                    {/* Show last command status beneath the button */}
                     <Typography fontSize="9px" sx={{ color: colors.greenAccent[400], textAlign: "center" }}>
-                      {printerActionStatus}
+                      {indentationStatus}
                     </Typography>
                   </Box>
                 )}
@@ -684,17 +710,13 @@ const Dashboard = () => {
 
     if (box.id === 3) {
       // Computes the mean of all displacement values currently in the buffer.
-      const displacementAvg =
-        series1Data.length > 0
-          ? series1Data.reduce((sum, d) => sum + (d.value ?? 0), 0) / series1Data.length
-          : null;
       return {
         ...box,
-        data: series1Data,
+        data: dashboardData.displacementSeries,
         content: (
           <StatBox
             title="Displacement Avg"
-            subtitle={displacementAvg !== null ? `${displacementAvg.toFixed(2)} cm` : "—"}
+            subtitle={dashboardData.displacementAvg !== null ? `${dashboardData.displacementAvg.toFixed(2)} cm` : "—"}
             icon={<SwapHorizIcon style={{ color: "#009688", fontSize: isCompactLandscape ? 18 : 28 }} />}
           />
         ),
@@ -702,17 +724,13 @@ const Dashboard = () => {
     }
     if (box.id === 4) {
       // Computes the mean of all force values currently in the buffer.
-      const forceAvg =
-        series2Data.length > 0
-          ? series2Data.reduce((sum, d) => sum + (d.value ?? 0), 0) / series2Data.length
-          : null;
       return {
         ...box,
-        data: series2Data,
+        data: dashboardData.forceSeries,
         content: (
           <StatBox
             title="Force Avg"
-            subtitle={forceAvg !== null ? `${forceAvg.toFixed(2)} N` : "—"}
+            subtitle={dashboardData.forceAvg !== null ? `${dashboardData.forceAvg.toFixed(2)} ${FORCE_UNIT}` : "—"}
             icon={<BoltIcon style={{ color: "#FF9800", fontSize: isCompactLandscape ? 18 : 28 }} />}
           />
         ),

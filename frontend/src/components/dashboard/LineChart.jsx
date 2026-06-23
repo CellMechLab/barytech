@@ -11,37 +11,158 @@ import html2canvas from "html2canvas";
 import { useTheme } from "@mui/material";
 import { tokens } from "../../theme";
 
+const FORCE_UNIT = process.env.REACT_APP_FORCE_UNIT || "N";
+const FALLBACK_SAMPLE_INTERVAL_MS = Math.max(
+  Number(process.env.REACT_APP_CHART_SAMPLE_INTERVAL_MS) || 1,
+  Number.EPSILON
+);
 const LineChart = forwardRef(({ dataset = "force" }, ref) => {
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
-  console.log("theme:", theme, "colors:", colors, "dataset:", dataset);
   const chartRef = useRef(null);
   const { dataBuffer } = useContext(WebSocketContext);
 
-  const transformData = (dataBuffer) => {
-    const aggregatedData = {};
-    dataBuffer.forEach((item) => {
-      const timestamp = Math.floor(new Date(item.timestamp).getTime() / 1000);
-      if (!aggregatedData[timestamp]) {
-        aggregatedData[timestamp] = { data1: [], data2: [] };
-      }
-      aggregatedData[timestamp].data1.push(item.displacement);
-      aggregatedData[timestamp].data2.push(item.force);
+  const parseTimestampMs = (timestamp, index) => {
+    const numericTimestamp =
+      typeof timestamp === "number" ||
+      (typeof timestamp === "string" && timestamp.trim() !== "")
+        ? Number(timestamp)
+        : NaN;
+
+    if (Number.isFinite(numericTimestamp)) {
+      return Math.abs(numericTimestamp) > 1e12
+        ? numericTimestamp
+        : numericTimestamp * 1000;
+    }
+
+    const parsedMs = new Date(timestamp).getTime();
+    if (!Number.isFinite(parsedMs)) {
+      return index;
+    }
+
+    const fractionalMatch = String(timestamp).match(/\.(\d+)(?=Z|[+-]\d{2}:?\d{2}|$)/);
+    if (!fractionalMatch) {
+      return parsedMs;
+    }
+
+    const baseSecondMs = parsedMs - (parsedMs % 1000);
+    const fractionalMs = Number(`0.${fractionalMatch[1]}`) * 1000;
+    return baseSecondMs + fractionalMs;
+  };
+
+  const formatTimestamp = (xValue) => {
+    const date = new Date(Math.floor(xValue));
+    const baseTime = d3.timeFormat("%H:%M:%S.%L")(date);
+    const microseconds = Math.floor((xValue - Math.floor(xValue)) * 1000);
+    return microseconds > 0
+      ? `${baseTime}${String(microseconds).padStart(3, "0")}`
+      : baseTime;
+  };
+
+  const hasHighResolutionTimestamp = (item, timestamp) => {
+    if (item.timestamp_ms != null) {
+      return true;
+    }
+
+    const numericTimestamp = Number(timestamp);
+    if (Number.isFinite(numericTimestamp)) {
+      return Math.abs(numericTimestamp) > 1e12;
+    }
+
+    return /\.\d+(?=Z|[+-]\d{2}:?\d{2}|$)/.test(String(timestamp));
+  };
+
+  const resolvePlotXValues = (dataBuffer) => {
+    const points = dataBuffer.map((item, index) => {
+      const timestamp =
+        item.timestamp_ms ?? item.timestamp ?? item.time ?? item.t;
+      const sampleIndex = Number(item.sample_index);
+
+      return {
+        index,
+        sampleIndex: Number.isFinite(sampleIndex) ? sampleIndex : index,
+        timestamp,
+        rawXValue: parseTimestampMs(timestamp, index),
+        hasHighResolutionTimestamp: hasHighResolutionTimestamp(item, timestamp),
+      };
     });
 
+    const xValues = new Array(points.length);
+    let groupStart = 0;
+
+    while (groupStart < points.length) {
+      let groupEnd = groupStart + 1;
+      while (
+        groupEnd < points.length &&
+        points[groupEnd].rawXValue === points[groupStart].rawXValue
+      ) {
+        groupEnd += 1;
+      }
+
+      const group = points
+        .slice(groupStart, groupEnd)
+        .sort((a, b) => a.sampleIndex - b.sampleIndex);
+      const nextXValue = points[groupEnd]?.rawXValue;
+      const availableWindow =
+        Number.isFinite(nextXValue) && nextXValue > group[0].rawXValue
+          ? nextXValue - group[0].rawXValue
+          : FALLBACK_SAMPLE_INTERVAL_MS * group.length;
+      const sampleInterval = availableWindow / group.length;
+
+      group.forEach((point, offset) => {
+        xValues[point.index] = point.rawXValue + offset * sampleInterval;
+      });
+
+      groupStart = groupEnd;
+    }
+
+    return { points, xValues };
+  };
+
+  const transformData = (dataBuffer) => {
     const series1 = [];
     const series2 = [];
-    Object.entries(aggregatedData).forEach(([timestamp, values]) => {
-      const date = new Date(timestamp * 1000);
-      series1.push({
-        date,
-        value: values.data1.reduce((a, b) => a + b, 0) / values.data1.length,
-      });
-      series2.push({
-        date,
-        value: values.data2.reduce((a, b) => a + b, 0) / values.data2.length,
-      });
+    const { points, xValues } = resolvePlotXValues(dataBuffer);
+    const latestPoint = points[points.length - 1];
+    const shouldDeferLatestGroup =
+      latestPoint && !latestPoint.hasHighResolutionTimestamp;
+
+    dataBuffer.forEach((item, index) => {
+      const timestamp =
+        item.timestamp_ms ?? item.timestamp ?? item.time ?? item.t;
+      const xValue = xValues[index];
+      const displacement =
+        item.displacement == null ? NaN : Number(item.displacement);
+      const force = item.force == null ? NaN : Number(item.force);
+
+      if (Number.isFinite(displacement)) {
+        series1.push({
+          date: new Date(Math.floor(xValue)),
+          xValue,
+          timestamp,
+          value: displacement,
+          isStable:
+            !shouldDeferLatestGroup ||
+            points[index].rawXValue !== latestPoint.rawXValue,
+        });
+      }
+
+      if (Number.isFinite(force)) {
+        series2.push({
+          date: new Date(Math.floor(xValue)),
+          xValue,
+          timestamp,
+          value: force,
+          isStable:
+            !shouldDeferLatestGroup ||
+            points[index].rawXValue !== latestPoint.rawXValue,
+        });
+      }
     });
+
+    series1.sort((a, b) => a.xValue - b.xValue);
+    series2.sort((a, b) => a.xValue - b.xValue);
+
     return { series1, series2 };
   };
 
@@ -51,16 +172,14 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
       return;
     }
 
-    const { series1, series2 } = transformData(dataBuffer);
-    const csvContent = [["Timestamp", "Displacement_Avg", "Force_Avg"]];
-    const maxLength = Math.max(series1.length, series2.length);
-    for (let i = 0; i < maxLength; i++) {
-      const timestamp =
-        series1[i]?.date.toISOString() || series2[i]?.date.toISOString() || "";
-      const data1Avg = series1[i]?.value || "";
-      const data2Avg = series2[i]?.value || "";
-      csvContent.push([timestamp, data1Avg, data2Avg]);
-    }
+    const csvContent = [["Timestamp", "Displacement", `Force (${FORCE_UNIT})`]];
+    dataBuffer.forEach((item) => {
+      csvContent.push([
+        item.timestamp_ms ?? item.timestamp ?? "",
+        item.displacement ?? "",
+        item.force ?? "",
+      ]);
+    });
 
     const csvString = csvContent.map((row) => row.join(",")).join("\n");
     const blob = new Blob([csvString], { type: "text/csv" });
@@ -103,18 +222,16 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
 
       const data = transformData(dataBuffer);
       const { series1, series2 } = data;
-      const series = dataset === "force" ? series2 : series1;
+      const fullSeries = dataset === "force" ? series2 : series1;
+      const series = fullSeries.filter((point) => point.isStable);
 
       const navHeight = 50;
 
-      const defaultXDomain = [
-        new Date(),
-        new Date(Date.now() + 60 * 60 * 1000),
-      ];
+      const defaultXDomain = [Date.now(), Date.now() + 60 * 60 * 1000];
       const defaultYDomain = dataset === "force" ? [-1e-6, 1e-6] : [-1e-12, 1e-12];
 
       const xDomain = series.length
-        ? d3.extent(series, (d) => d.date)
+        ? d3.extent(series, (d) => d.xValue)
         : defaultXDomain;
 
       const yDomain = series.length
@@ -123,12 +240,10 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
       const yPadding = (yDomain[1] - yDomain[0]) * 0.2 || (dataset === "force" ? 1e-7 : 1e-13);
       const yDomainPadded = [yDomain[0] - yPadding, yDomain[1] + yPadding];
 
-      console.log("domains", xDomain, yDomainPadded);
-
-      const x = d3.scaleTime().domain(xDomain).range([0, chartWidth]).nice();
+      const x = d3.scaleLinear().domain(xDomain).range([0, chartWidth]).nice();
       const y = d3.scaleLinear().domain(yDomainPadded).range([chartHeight, 0]).nice();
 
-      const xNav = d3.scaleTime().domain(x.domain()).range([0, chartWidth]);
+      const xNav = d3.scaleLinear().domain(x.domain()).range([0, chartWidth]);
       const yNav = d3.scaleLinear().domain(y.domain()).range([navHeight, 0]);
 
       const svg = d3
@@ -173,7 +288,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
 
       const line = d3
         .line()
-        .x((d) => x(d.date))
+        .x((d) => x(d.xValue))
         .y((d) => y(d.value));
 
       linesGroup
@@ -183,20 +298,6 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         .attr("d", line)
         .attr("stroke", dataset === "force" ? "#FF9800" : "#009688")
         .attr("fill", "none");
-
-      const circles = linesGroup
-        .selectAll(`.point-${dataset}`)
-        .data(series)
-        .enter()
-        .append("circle")
-        .attr("class", `point-${dataset}`)
-        .attr("cx", (d) => x(d.date))
-        .attr("cy", (d) => y(d.value))
-        .attr("r", 4)
-        .attr("fill", dataset === "force" ? "#FF9800" : "#009688")
-        .on("mouseover", (event, d) => showTooltip(event, d, dataset === "force" ? "Force" : "Displacement"))
-        .on("mousemove", moveTooltip)
-        .on("mouseout", hideTooltip);
 
       const tooltip = d3
         .select(chartRef.current)
@@ -215,9 +316,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
       function showTooltip(event, d, label) {
         tooltip
           .html(
-            `${label}<br>Date: ${d3.timeFormat("%Y-%m-%d %H:%M:%S")(
-              d.date
-            )}<br>Value: ${d.value.toExponential(2)} ${label === "Force" ? "N" : "m"}`
+            `${label}<br>Time: ${d.timestamp || formatTimestamp(d.xValue)}<br>Value: ${d.value.toExponential(2)} ${label === "Force" ? FORCE_UNIT : "m"}`
           )
           .style("display", "block");
       }
@@ -233,11 +332,30 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         tooltip.style("display", "none");
       }
 
-      const xAxis = chartGroup
+      const showPointMarkers = series.length <= 1000;
+      const circles = showPointMarkers
+        ? linesGroup
+            .selectAll(`.point-${dataset}`)
+            .data(series)
+            .enter()
+            .append("circle")
+            .attr("class", `point-${dataset}`)
+            .attr("cx", (d) => x(d.xValue))
+            .attr("cy", (d) => y(d.value))
+            .attr("r", 4)
+            .attr("fill", dataset === "force" ? "#FF9800" : "#009688")
+            .on("mouseover", (event, d) => showTooltip(event, d, dataset === "force" ? "Force" : "Displacement"))
+            .on("mousemove", moveTooltip)
+            .on("mouseout", hideTooltip)
+        : linesGroup.selectAll(`.point-${dataset}`);
+
+      const xAxisGroup = chartGroup
         .append("g")
         .attr("class", "x-axis")
         .attr("transform", `translate(0,${chartHeight})`)
-        .call(d3.axisBottom(x).ticks(10).tickFormat(d3.timeFormat("%H:%M:%S")))
+        .call(d3.axisBottom(x).ticks(10).tickFormat(formatTimestamp));
+
+      xAxisGroup
         .append("text")
         .attr("x", chartWidth / 2)
         .attr("y", 35)
@@ -245,7 +363,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         .attr("text-anchor", "middle")
         .text("Time");
 
-      const yAxis = chartGroup
+      const yAxisGroup = chartGroup
         .append("g")
         .attr("class", "y-axis")
         .call(
@@ -253,18 +371,20 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
             .axisLeft(y)
             .ticks(10)
             .tickFormat((d) => d.toExponential(2))
-        )
+        );
+
+      yAxisGroup
         .append("text")
         .attr("x", -chartHeight / 2)
         .attr("y", -40)
         .attr("fill", colors.grey?.[900] || "#333")
         .attr("text-anchor", "middle")
         .attr("transform", "rotate(-90)")
-        .text(dataset === "force" ? "Force (N)" : "Displacement (m)");
+        .text(dataset === "force" ? `Force (${FORCE_UNIT})` : "Displacement (m)");
 
       const navLine = d3
         .line()
-        .x((d) => xNav(d.date))
+        .x((d) => xNav(d.xValue))
         .y((d) => yNav(d.value));
 
       navGroup
@@ -337,24 +457,24 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
           x.domain([x0, x1]);
 
           const filteredSeries = series.filter(
-            (d) => d.date >= x0 && d.date <= x1
+            (d) => d.xValue >= x0 && d.xValue <= x1
           );
 
-          y.domain([
-            d3.min(filteredSeries, (d) => d.value) - yPadding,
-            d3.max(filteredSeries, (d) => d.value) + yPadding,
-          ]).nice();
+          if (filteredSeries.length) {
+            y.domain([
+              d3.min(filteredSeries, (d) => d.value) - yPadding,
+              d3.max(filteredSeries, (d) => d.value) + yPadding,
+            ]).nice();
+          }
 
           linesGroup.select(`.line-${dataset}`).attr("d", line);
 
           circles
-            .attr("cx", (d) => x(d.date))
+            .attr("cx", (d) => x(d.xValue))
             .attr("cy", (d) => y(d.value));
 
-          xAxis.call(
-            d3.axisBottom(x).ticks(10).tickFormat(d3.timeFormat("%H:%M:%S"))
-          );
-          yAxis.call(
+          xAxisGroup.call(d3.axisBottom(x).ticks(10).tickFormat(formatTimestamp));
+          yAxisGroup.call(
             d3
               .axisLeft(y)
               .ticks(10)
