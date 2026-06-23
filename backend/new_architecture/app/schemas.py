@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
+from typing import Optional, List
 
 class UserCreate(BaseModel):
     username: str
@@ -8,10 +9,6 @@ class UserCreate(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
-
-
-from pydantic import BaseModel, Field
-from typing import Optional
 
 
 class IoTDeviceCreate(BaseModel):
@@ -52,3 +49,79 @@ class UserResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class FolderCreate(BaseModel):
+    """Payload sent by the frontend when creating a new measurement folder."""
+    # User-defined label for the folder, e.g. "Collagen A 2026-06-18".
+    name: str
+
+
+class FolderResponse(BaseModel):
+    """Folder row returned to the frontend after creation or listing."""
+    # Auto-assigned primary key for the folder.
+    id: int
+    # Human-readable folder name.
+    name: str
+    # UTC creation timestamp.
+    created_at: datetime
+    # Total number of distinct save cycles (curves) stored in this folder.
+    curve_count: int = 0
+    # Total number of device_data rows across all curves in this folder.
+    row_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class CurveInfo(BaseModel):
+    """Summary of a single save-cycle curve within a folder."""
+    # Zero-based index of this curve within the folder.
+    curve_index: int
+    # Number of device_data rows that belong to this curve.
+    row_count: int
+
+
+# ── Grouped device-data response schemas ─────────────────────────────────────
+
+class DeviceDataRowResponse(BaseModel):
+    """A single device_data row returned as part of a grouped hierarchy response."""
+    # Primary key of the device_data row.
+    id: int
+    # ID of the IoT device that produced this reading.
+    device_id: str
+    # UTC timestamp when the reading was recorded.
+    timestamp: datetime
+    # Displacement reading in mm.
+    displacement: float
+    # Force reading in N.
+    force: float
+    # Folder this row was saved into; None for rows saved before folders existed.
+    folder_id: Optional[int] = None
+    # Zero-based index of the save-cycle within the folder.
+    curve_index: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class GroupedCurveResponse(BaseModel):
+    """All device_data rows belonging to one save-cycle (ON→OFF) within a folder."""
+    # Zero-based index identifying this curve within its parent folder.
+    curve_index: int
+    # Pre-computed row count so the frontend can display it without counting rows.
+    row_count: int
+    # Actual data rows ordered by timestamp ascending.
+    rows: List[DeviceDataRowResponse]
+
+
+class GroupedFolderResponse(BaseModel):
+    """A folder (or the null-folder bucket for ungrouped rows) with all its curves."""
+    # DB primary key of the folder; None for the synthetic "No folder" group.
+    folder_id: Optional[int]
+    # Display name shown in the tree header row.
+    folder_name: str
+    # UTC creation timestamp of the folder; None for the null-folder group.
+    folder_created_at: Optional[datetime] = None
+    # Curves inside this folder, ordered by curve_index ascending.
+    curves: List[GroupedCurveResponse]

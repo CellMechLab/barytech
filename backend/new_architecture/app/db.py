@@ -3,7 +3,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.future import select
-from app.models import Base, DeviceData, ClientSession, IoTDevice
+from app.models import Base, DeviceData, ClientSession, IoTDevice, Folder
 from app.config import settings
 from datetime import datetime
 from fastapi import HTTPException
@@ -234,3 +234,76 @@ async def export_device_data_to_hdf5(file_path: str = "data/device_data.hdf5", u
         # Logs the absolute output location to simplify export-path debugging.
         resolved_output_file_path = os.path.abspath(file_path)
         print(f"Exported {len(force_values)} records to {resolved_output_file_path}")
+
+
+async def export_folder_to_hdf5(file_path: str, folder_id: int, user_id: int) -> str:
+    """Export all curves in a folder to a single HDF5 file.
+
+    The file is structured as:
+        curve0/segment0/Force   — float array
+        curve0/segment0/Z       — float array
+        curve1/segment0/Force
+        curve1/segment0/Z
+        …
+
+    Rows are queried from device_data filtered by folder_id and ordered by
+    curve_index then timestamp so each curve is written in chronological order.
+    Returns the resolved absolute path of the written file.
+    """
+    # Resolve and create the output directory before any DB work.
+    export_directory_path = os.path.dirname(file_path) or "."
+    os.makedirs(export_directory_path, exist_ok=True)
+
+    async with AsyncSessionLocal() as session:
+        # Verify that the folder exists and belongs to the requesting user.
+        folder_result = await session.execute(
+            select(Folder).where(Folder.id == folder_id, Folder.user_id == user_id)
+        )
+        folder = folder_result.scalars().first()
+        if not folder:
+            # Prevent leaking data from other users or non-existent folders.
+            raise HTTPException(status_code=404, detail="Folder not found or not authorized.")
+
+        # Fetch all device_data rows for this folder ordered for deterministic curve output.
+        data_result = await session.execute(
+            select(DeviceData)
+            .where(DeviceData.folder_id == folder_id)
+            .order_by(DeviceData.curve_index, DeviceData.timestamp)
+        )
+        rows = data_result.scalars().all()
+
+        if not rows:
+            # 400, not 404 — the folder exists but contains no recorded device_data yet.
+            raise HTTPException(status_code=400, detail="This folder has no recorded data yet. Start a save session with this folder selected first.")
+
+        # Group rows by curve_index into an ordered dict.
+        # Using a plain dict preserves insertion order (Python 3.7+).
+        curves: dict = {}
+        for row in rows:
+            idx = row.curve_index if row.curve_index is not None else 0
+            if idx not in curves:
+                curves[idx] = {"force": [], "z": []}
+            curves[idx]["force"].append(row.force)
+            curves[idx]["z"].append(row.displacement)
+
+        # Write the HDF5 file with one group per curve.
+        with h5py.File(file_path, "w") as hdf:
+            for curve_idx in sorted(curves.keys()):
+                # Each curve lives under curveN/segment0/.
+                curve_group = hdf.create_group(f"curve{curve_idx}")
+                segment_group = curve_group.create_group("segment0")
+                segment_group.create_dataset(
+                    "Force",
+                    data=np.array(curves[curve_idx]["force"], dtype=float),
+                )
+                segment_group.create_dataset(
+                    "Z",
+                    data=np.array(curves[curve_idx]["z"], dtype=float),
+                )
+
+        resolved_path = os.path.abspath(file_path)
+        total_rows = sum(len(c["force"]) for c in curves.values())
+        print(
+            f"Folder export: {len(curves)} curve(s), {total_rows} rows → {resolved_path}"
+        )
+        return resolved_path

@@ -7,6 +7,26 @@ from sqlalchemy import select
 
 Base = declarative_base()
 
+
+class Folder(Base):
+    """Named container that groups one or more measurement curves for a user."""
+    __tablename__ = "folders"
+
+    # Auto-incrementing primary key for the folder row.
+    id = Column(Integer, primary_key=True, index=True)
+    # Human-readable label set by the user, e.g. "Collagen A 2026-06-18".
+    name = Column(String, nullable=False)
+    # Foreign key linking the folder to its owning user account.
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    # UTC timestamp recorded when the folder was first created.
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # ORM back-reference to the owning User row.
+    user = relationship("User", back_populates="folders")
+    # All device_data rows that belong to this folder; deleted when folder is removed.
+    device_data = relationship("DeviceData", back_populates="folder", cascade="all, delete-orphan")
+
+
 class DeviceData(Base):
     __tablename__ = "device_data"
     
@@ -15,9 +35,15 @@ class DeviceData(Base):
     timestamp = Column(DateTime, default=datetime.utcnow)  # Time the data was recorded
     displacement = Column(Float, nullable=False)  # Displacement data
     force = Column(Float, nullable=False)  # Force data
+    # Foreign key to the folder this row belongs to; nullable for un-grouped rows.
+    folder_id = Column(Integer, ForeignKey("folders.id"), nullable=True, index=True)
+    # Zero-based index of the save-cycle (ON→OFF) within the folder this row was recorded during.
+    curve_index = Column(Integer, default=0, nullable=False)
 
     # Relationship with IoTDevice
     device = relationship("IoTDevice", back_populates="data")
+    # ORM back-reference to the parent Folder row.
+    folder = relationship("Folder", back_populates="device_data")
 
 
 class ClientSession(Base):
@@ -36,6 +62,8 @@ class User(Base):
     hashed_password = Column(String)
     # Relationship to IoTDevice
     devices = relationship("IoTDevice", back_populates="user")
+    # Relationship to Folder — all folders owned by this user.
+    folders = relationship("Folder", back_populates="user")
 
     
 

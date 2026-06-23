@@ -9,7 +9,7 @@ from fastapi import WebSocket
 from app.db import get_db, save_device_data_batch
 from app.models import IoTDevice
 from app.websocket_manager import websocket_connections  # Import from websocket_manager
-from app.shared_state import save_flag  # Import save_flag
+import app.shared_state as shared_state  # Import shared save state (save_flag, folder_id, curve_index)
 
 # Global variables for device queues
 device_queues: Dict[str, asyncio.Queue] = {}
@@ -95,8 +95,8 @@ async def process_message_batches(msg):
         except asyncio.QueueFull:
             print(f"Warning: Device queue full for {device_id}")
         
-        # Save message if save flag is enabled
-        if save_flag:
+        # Save message if save flag is enabled; attach current folder/curve context.
+        if shared_state.save_flag:
             await start_device_saver(device_id)
             try:
                 device_save_queues[device_id].put_nowait(message_content)
@@ -166,7 +166,7 @@ async def global_message_processor():
                         break
                 
                 # Save messages if save flag is enabled
-                if save_flag:
+                if shared_state.save_flag:
                     await start_device_saver(device_id)
                     for message_content in device_messages:
                         try:
@@ -269,6 +269,12 @@ async def process_batch(device_id: str, batch: list):
                 await db.commit()
                 print(f"Device {device_id} created successfully")
             
+            # Snapshot folder context at batch-flush time so all rows in this
+            # batch share a consistent folder_id and curve_index even if the
+            # user toggles save off mid-flight.
+            batch_folder_id = shared_state.current_folder_id
+            batch_curve_index = shared_state.current_curve_index
+
             # Convert messages to records for bulk insert
             records = []
             for msg in batch:
@@ -279,7 +285,10 @@ async def process_batch(device_id: str, batch: list):
                     "device_id": msg["device_id"],
                     "timestamp": timestamp,
                     "displacement": msg["displacement"],
-                    "force": msg["force"]
+                    "force": msg["force"],
+                    # Stamp every row with the folder and curve it belongs to.
+                    "folder_id": batch_folder_id,
+                    "curve_index": batch_curve_index,
                 })
 
             # Bulk insert
@@ -321,9 +330,10 @@ async def _resolve_user_id_for_device(device_id: str) -> str:
     Result is cached in device_user_map to avoid repeated queries.
     Falls back to "1" if the device is not found.
     """
-    # Return cached value if already resolved
-    if device_id in device_user_map:
-        return device_user_map[device_id]
+    # Re-use cache only when the target user still has an active WebSocket connection
+    cached_user_id = device_user_map.get(device_id)
+    if cached_user_id and websocket_connections.get(cached_user_id):
+        return cached_user_id
 
     # Prevent crash if DB is temporarily unavailable during lookup
     try:
@@ -355,11 +365,6 @@ async def broadcast_messages(device_id: str):
     BATCH_TIMEOUT = 0.05  # Backend processing timeout
     queue = device_queues[device_id]
 
-    # Resolve which user (WebSocket key) this device belongs to via DB lookup
-    target_frontend = await _resolve_user_id_for_device(device_id)
-
-    print(f"[ROUTE] Device {device_id} routed to user WebSocket key '{target_frontend}'")
-
     while True:
         batch = []
         start_time = time.time()  # Track the time when batch collection started
@@ -375,43 +380,29 @@ async def broadcast_messages(device_id: str):
         if batch:
             # MONITORING: Count device processed messages
             processing_counters.device_processed += len(batch)
+
+            # Re-resolve owner on each batch so routing picks up DB changes and new WebSocket sessions
+            target_frontend = await _resolve_user_id_for_device(device_id)
             
             print(f"[SEND] Sending batch of {len(batch)} messages from {device_id} to frontend-{target_frontend}")
             total_messages_sent_to_frontend += len(batch)  # Update the accumulator
             print(f"[STATS] Total messages sent to frontend: {total_messages_sent_to_frontend}")
             
-            # Prefer the configured frontend mapping, but fall back to every connected
-            # client so telemetry is not stranded when login/user ids differ.
-            target_clients = [target_frontend]
-            if not websocket_connections.get(target_frontend):
-                target_clients = [
-                    client_id
-                    for client_id, connections in websocket_connections.items()
-                    if connections
-                ]
-
-            total_connections = sum(
-                len(websocket_connections.get(client_id, set()))
-                for client_id in target_clients
-            )
-            print(
-                f"[CHECK] Sending telemetry from {device_id} to clients "
-                f"{target_clients}: {total_connections} connections"
-            )
-
-            if total_connections:
+            # Send only to the target frontend
+            websockets = websocket_connections.get(target_frontend, set())
+            print(f"[CHECK] Checking websockets for frontend-{target_frontend}: {len(websockets)} connections")
+            if websockets:
                 try:
-                    for client_id in target_clients:
-                        await send_to_connected_clients_optimized(client_id, batch)
+                    await send_to_connected_clients_optimized(target_frontend, batch)
                     # MONITORING: Count successful broadcasts
                     processing_counters.broadcast_sent += len(batch)
-                    print(f"[OK] Successfully sent {len(batch)} messages")
+                    print(f"[OK] Successfully sent {len(batch)} messages to frontend-{target_frontend}")
                 except Exception as e:
                     # MONITORING: Count broadcast errors
                     processing_counters.broadcast_errors += len(batch)
-                    print(f"[ERROR] Error sending telemetry: {e}")
+                    print(f"[ERROR] Error sending to frontend-{target_frontend}: {e}")
             else:
-                print("[WARNING] No WebSocket connections found for telemetry")
+                print(f"[WARNING] No WebSocket connections found for frontend-{target_frontend}")
         else:
             # No messages collected in this cycle, sleep briefly to reduce CPU usage
             await asyncio.sleep(0.005)  # Reduced sleep time

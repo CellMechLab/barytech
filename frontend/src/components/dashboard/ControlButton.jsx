@@ -11,7 +11,8 @@ import { toast } from "sonner"; // Import Sonner's toast function
 const Controls = ({ type }) => {
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
-  const { saveEnabled, setSaveEnabled } = useSave();
+  // activeFolderId is needed to stamp the folder onto every save WebSocket message.
+  const { saveEnabled, setSaveEnabled, activeFolderId } = useSave();
 
   const { toggleConnection, connected, socket } = useContext(WebSocketContext);
 
@@ -34,8 +35,8 @@ const Controls = ({ type }) => {
         const newSaveState = !saveEnabled;
         setSaveEnabled(newSaveState);
 
-        // Data to send over WebSocket
-        const data = { type: "save", save: newSaveState };
+        // Include folder_id so the backend stamps every saved row with the active folder and curve index.
+        const data = { type: "save", save: newSaveState, folder_id: activeFolderId };
         socket.send(JSON.stringify(data));
 
         // Show toast message

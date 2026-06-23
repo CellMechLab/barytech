@@ -12,7 +12,7 @@ import threading
 from contextlib import asynccontextmanager
 from app.websocket_manager import websocket_connections
 from .auth import router as auth_router
-from app.shared_state import save_flag, main_event_loop
+from app.shared_state import save_flag, main_event_loop, current_folder_id, current_curve_index, folder_curve_index_map
 from app.routers import router
 from strawberry.asgi import GraphQL
 import strawberry
@@ -229,12 +229,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     print(f"Published slider data to PAR: {params}")
                 
                 elif message_type == "save":
-                    # Handle save action
-                    save_flag = params.get("save", False)
-                    print(f"Save flag received: {save_flag}")
-                    # Perform actions for save flag
-                    # For example, update a global variable or call a function
-                    handle_save_flag(save_flag)
+                    # Handle save action — payload may include folder_id for grouping curves.
+                    new_save_flag = params.get("save", False)
+                    # Folder the frontend wants to record into; None means legacy behaviour.
+                    new_folder_id = params.get("folder_id", None)
+                    print(f"Save flag received: {new_save_flag}, folder_id: {new_folder_id}")
+                    handle_save_flag(new_save_flag, new_folder_id)
                 
                 else:
                     print(f"Unknown message type: {message_type}")
@@ -364,10 +364,39 @@ async def printer_status_ws(websocket: WebSocket):
         push_task.cancel()
 
 
-def handle_save_flag(flag):
-    import app.shared_state
-    app.shared_state.save_flag = flag
+def handle_save_flag(flag: bool, folder_id=None):
+    """
+    Update the global save state.
+
+    On a False→True transition the curve_index for the target folder is
+    incremented so every new save session records into a distinct curve slot.
+    folder_id is stored globally so message_processor can stamp rows without
+    the WebSocket context being passed all the way down the call stack.
+    """
+    import app.shared_state as state
+
+    # Detect the False→True edge that marks the start of a new curve.
+    is_rising_edge = (not state.save_flag) and flag
+
+    state.save_flag = flag
+
     if flag:
+        # Remember which folder this save session targets.
+        state.current_folder_id = folder_id
+
+        if is_rising_edge and folder_id is not None:
+            # Increment the curve counter for this folder on each new ON press.
+            previous_index = state.folder_curve_index_map.get(folder_id, -1)
+            state.folder_curve_index_map[folder_id] = previous_index + 1
+            state.current_curve_index = state.folder_curve_index_map[folder_id]
+            print(f"Save ON — folder {folder_id}, curve_index {state.current_curve_index}")
+        elif is_rising_edge:
+            # No folder_id provided; reset to index 0 for legacy behaviour.
+            state.current_curve_index = 0
+            print("Save ON — no folder_id, curve_index 0")
+
         print("Save data action triggered!")
     else:
         print("Save data action disabled.")
+        # Keep current_folder_id and current_curve_index so any in-flight
+        # messages still being flushed to DB pick up the correct values.

@@ -2,8 +2,10 @@
 import {
   Box,
   Button,
+  CircularProgress,
   IconButton,
   Typography,
+  Tooltip,
   useTheme,
   useMediaQuery,
 } from "@mui/material";
@@ -13,12 +15,14 @@ import Header from "./Header";
 import LineChart from "./LineChart";
 import StatBox from "./StatBox";
 import ControlButton from "./ControlButton";
+import FolderSelector from "./FolderSelector";
 import { useState, useCallback, useRef, useContext, useEffect, useMemo } from "react";
 import DraggableBox from "./DraggableBox";
 import { WebSocketContext } from "./WebSocketProvider";
 import usePrinterControls from "./hooks/usePrinterControls";
 import useDeviceDataExport from "./hooks/useDeviceDataExport";
 import { useSave } from "../../context/SaveContext";
+import { BACKEND_BASE_URL, VIDEO_BASE_URL } from "../../config/endpoints";
 import { toast } from "sonner";
 import BoltIcon from "@mui/icons-material/Bolt";
 import SwapHorizIcon from "@mui/icons-material/SwapHoriz";
@@ -34,9 +38,6 @@ import LinkIcon from "@mui/icons-material/Link";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import FileUploadIcon from "@mui/icons-material/FileUpload";
-import SaveAltIcon from "@mui/icons-material/SaveAlt";
-import { BACKEND_BASE_URL, VIDEO_BASE_URL } from "../../config/endpoints";
-
 const FORCE_UNIT = process.env.REACT_APP_FORCE_UNIT || "N";
 const Dashboard = () => {
   const backendApiUrl = BACKEND_BASE_URL;
@@ -45,8 +46,50 @@ const Dashboard = () => {
   const [totalDataPoints, setTotalDataPoints] = useState(0);
   // Pulls data stream, WS toggle, live connection state, and socket from shared context.
   const { dataBuffer, toggleConnection, connected, socket } = useContext(WebSocketContext);
-  // Shared save-enabled flag so the save button and any other consumer stay in sync.
-  const { saveEnabled, setSaveEnabled } = useSave();
+  // Shared save state: flag + the folder that incoming data will be written into.
+  const { saveEnabled, setSaveEnabled, activeFolderId } = useSave();
+
+  // Folder list fetched on mount so the download button can show the active folder name.
+  const [folders, setFolders] = useState([]);
+  // True while the folder HDF5 download request is in flight.
+  const [folderDownloading, setFolderDownloading] = useState(false);
+
+  // Fetch folders once on mount using the same auth pattern as FolderSelector.
+  useEffect(() => {
+    const loadFolders = async () => {
+      try {
+        const token = sessionStorage.getItem("authToken");
+        if (!token) return;
+        const res = await fetch(`${BACKEND_BASE_URL}/api/folders/`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.ok) setFolders(await res.json());
+      } catch (err) {
+        // Non-critical — button will fall back to generic label if fetch fails.
+        console.error("[Dashboard] folder fetch failed:", err);
+      }
+    };
+    loadFolders();
+  }, []);
+
+  // Hook that provides the folder-scoped HDF5 download helper.
+  const { downloadFolderData } = useDeviceDataExport(backendApiUrl);
+
+  // Trigger an HDF5 download for the currently active folder.
+  const handleFolderDownload = async () => {
+    if (!activeFolderId) return;
+    setFolderDownloading(true);
+    try {
+      await downloadFolderData(activeFolderId);
+    } finally {
+      setFolderDownloading(false);
+    }
+  };
+
+  // Derives a display label from the folders list for the download button.
+  const activeFolderName = activeFolderId
+    ? (folders.find((f) => f.id === activeFolderId)?.name ?? "folder")
+    : null;
 
   const {
     printerActionInProgress,
@@ -68,7 +111,6 @@ const Dashboard = () => {
     handleDisconnectPrinter,
   } = usePrinterControls(backendApiUrl);
 
-  const { downloadDeviceData } = useDeviceDataExport(backendApiUrl);
 
   /**
    * Unified connect/disconnect handler for the Controls & Status card.
@@ -88,26 +130,60 @@ const Dashboard = () => {
   };
 
   /**
-   * Toggles save mode: flips the shared flag and notifies the backend over WebSocket.
-   * Requires an open socket — shows a toast error if the connection is not ready.
+   * Starts save mode and immediately triggers an indentation test.
+   * Save is stopped automatically when the test completes or fails,
+   * so each indentation run is recorded as exactly one curve.
+   * Requires an open WS socket and a selected folder.
    */
-  const handleSaveToggle = () => {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const newSaveState = !saveEnabled;
-      setSaveEnabled(newSaveState);
-      // Inform backend so it starts/stops persisting incoming device data.
-      socket.send(JSON.stringify({ type: "save", save: newSaveState }));
-      toast(
-        newSaveState ? "Save mode enabled." : "Save mode disabled.",
-        { style: { backgroundColor: newSaveState ? "#3da58a" : "#d32f2f", color: "white" } }
-      );
-    } else {
-      // Prevent silent failure when save is clicked before a WS connection exists.
-      toast.error("Connect first before enabling save.", {
+  const handleStartIndentationWithSave = () => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      // Prevent silent failure when the data socket is not ready.
+      toast.error("Connect first before starting indentation.", {
         style: { backgroundColor: "red", color: "white" },
       });
+      return;
     }
+    if (!activeFolderId) {
+      // Save destination must be chosen before recording can begin.
+      toast.error("Select a folder before starting indentation.", {
+        style: { backgroundColor: "red", color: "white" },
+      });
+      return;
+    }
+    // Enable save so incoming data is persisted from the first measurement.
+    setSaveEnabled(true);
+    // Notify backend: open a new curve in the selected folder.
+    socket.send(JSON.stringify({ type: "save", save: true, folder_id: activeFolderId }));
+    toast("Recording started — indentation test beginning.", {
+      style: { backgroundColor: "#3da58a", color: "white" },
+    });
+    // Mark that this save session was auto-started so the completion handler can stop it.
+    indentationSaveActive.current = true;
+    handleStartIndentation();
   };
+
+  // Auto-stop save when the indentation test finishes or fails so the curve is closed cleanly.
+  useEffect(() => {
+    if (!indentationSaveActive.current) return;
+
+    // Detect both normal completion and request failure so no orphaned open-save exists.
+    const completed = indentationStatus === "Indentation completed. Ready for the next test.";
+    const failed    = indentationStatus === "Unable to start indentation. Check the printer connection and try again.";
+
+    if (completed || failed) {
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        setSaveEnabled(false);
+        // Instruct backend to close and persist the current curve.
+        socket.send(JSON.stringify({ type: "save", save: false, folder_id: activeFolderId }));
+        toast(
+          completed ? "Indentation complete — curve saved." : "Indentation failed — recording stopped.",
+          { style: { backgroundColor: completed ? "#3da58a" : "#d32f2f", color: "white" } }
+        );
+      }
+      indentationSaveActive.current = false;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [indentationStatus]);
 
   const handleDataPointCountChange = (count) => {
     setTotalDataPoints(count);
@@ -182,7 +258,8 @@ const Dashboard = () => {
     : "minmax(140px, auto)";
 
   // Controls whether the Camera View card shows manual jog controls or automatic mode.
-  const [cameraMode, setCameraMode] = useState("manual");
+  // Defaults to automatic so the indentation workflow is immediately available on load.
+  const [cameraMode, setCameraMode] = useState("auto");
 
   const dashboardData = useMemo(() => {
     let displacementTotal = 0;
@@ -236,6 +313,8 @@ const Dashboard = () => {
   }, [dataBuffer]);
 
   const chartRef = useRef();
+  // True while save was auto-started by an indentation test; drives the auto-stop effect.
+  const indentationSaveActive = useRef(false);
   const handleDownload = () => {
     if (chartRef.current) chartRef.current.downloadChart();
   };
@@ -502,18 +581,32 @@ const Dashboard = () => {
                     </Box>
                   </>
                 ) : (
-                  /* Automatic mode — single Start Indentation action */
+                  /* Automatic mode — Start Indentation now also owns save start/stop */
                   <Box display="flex" flexDirection="column" alignItems="center" justifyContent="center" flexGrow={1} gap="8px">
                     <Typography fontSize="9px" sx={{ color: colors.grey[400], textAlign: "center" }}>
                       Automatic indentation test
                     </Typography>
-                    <Button
-                      disabled={printerActionInProgress}
-                      onClick={handleStartIndentation}
-                      sx={startIndentBtnStyle}
-                    >
-                      ▶ Start Indentation
-                    </Button>
+                    {/* Tooltip appears when no folder is selected so the user knows why the button is disabled.
+                        The outer span is required because MUI Tooltip needs mouse events the disabled button suppresses. */}
+                    <Tooltip title={!activeFolderId ? "Select a folder first" : ""} placement="top">
+                      <Box component="span">
+                        <Button
+                          disabled={printerActionInProgress || !activeFolderId}
+                          onClick={handleStartIndentationWithSave}
+                          sx={{
+                            ...startIndentBtnStyle,
+                            // Show green fill while a recording session is active.
+                            ...(saveEnabled && {
+                              backgroundColor: colors.greenAccent[700],
+                              border: `1px solid ${colors.greenAccent[400]}`,
+                            }),
+                          }}
+                        >
+                          {saveEnabled ? "⏺ Recording…" : "▶ Start Indentation"}
+                        </Button>
+                      </Box>
+                    </Tooltip>
+                    {/* Live indentation test state (Waiting / In progress / Completed / Failed) */}
                     <Typography fontSize="9px" sx={{ color: colors.greenAccent[400], textAlign: "center" }}>
                       {indentationStatus}
                     </Typography>
@@ -561,12 +654,6 @@ const Dashboard = () => {
         "&:disabled": { opacity: 0.35 },
         minWidth: 0, minHeight: btnMinH,
       };
-      const eStopBase = {
-        fontSize: btnFont, padding: btnPad,
-        color: "#fff", border: "1px solid #c62828", backgroundColor: "#c62828",
-        "&:hover": { backgroundColor: "#b71c1c" },
-        minWidth: 0, minHeight: btnMinH,
-      };
       const connectBase = {
         ...utilBtnBase,
         backgroundColor: connected ? colors.greenAccent[700] : "transparent",
@@ -576,15 +663,6 @@ const Dashboard = () => {
         color: colors.grey[100], border: "1px solid #c62828", backgroundColor: "transparent",
         "&:hover": { backgroundColor: "#c62828" },
         "&:disabled": { opacity: 0.35 },
-        minWidth: 0, minHeight: btnMinH,
-      };
-      // Save button turns solid blue when save mode is active, transparent when off.
-      const saveBtnBase = {
-        fontSize: btnFont, padding: btnPad,
-        color: colors.grey[100],
-        border: `1px solid ${colors.blueAccent[400]}`,
-        backgroundColor: saveEnabled ? colors.blueAccent[700] : "transparent",
-        "&:hover": { backgroundColor: colors.blueAccent[600] },
         minWidth: 0, minHeight: btnMinH,
       };
       // Ensures every action button stretches to fill its grid cell.
@@ -622,10 +700,12 @@ const Dashboard = () => {
                 minHeight={0}
                 sx={{ ...panelStyle, flex: "0 0 58%", overflow: "hidden", p: sectionPad }}
               >
-                {/* 4 columns: Connect · Home · E-Stop · Save */}
+                {/* Folder selector — must be set before Save can be pressed */}
+                <FolderSelector fontSize={isCompactLandscape ? "10px" : "11px"} />
+                {/* 3 columns: Connect · Home · E-Stop (Save is now driven by Start Indentation) */}
                 <Box
                   display="grid"
-                  gridTemplateColumns="repeat(4, minmax(0, 1fr))"
+                  gridTemplateColumns="repeat(3, minmax(0, 1fr))"
                   gridAutoRows={`minmax(${btnMinH}px, auto)`}
                   gap={isCompactLandscape ? "5px" : "8px"}
                   flexGrow={1}
@@ -647,21 +727,26 @@ const Dashboard = () => {
                   >
                     Home All
                   </Button>
-                  <Button
-                    disabled={printerActionInProgress}
-                    onClick={handleEmergencyStop}
-                    startIcon={<StopIcon sx={{ fontSize: 11 }} />}
-                    sx={{ ...eStopBase, ...fullWidth }}
-                  >
-                    E-STOP
-                  </Button>
-                  <Button
-                    onClick={handleSaveToggle}
-                    startIcon={<SaveAltIcon sx={{ fontSize: 11 }} />}
-                    sx={{ ...saveBtnBase, ...fullWidth }}
-                  >
-                    {saveEnabled ? "Saving" : "Save"}
-                  </Button>
+                  {/* Tooltip explains why the button is disabled when no folder is selected. */}
+                  <Tooltip title={!activeFolderId ? "Select a folder first" : ""} placement="top">
+                    <Box
+                      component="span"
+                      sx={{ display: "flex", width: "100%", minHeight: btnMinH, height: "100%", alignSelf: "stretch" }}
+                    >
+                      <Button
+                        disabled={!activeFolderId || folderDownloading}
+                        onClick={handleFolderDownload}
+                        startIcon={
+                          folderDownloading
+                            ? <CircularProgress size={11} sx={{ color: colors.grey[100] }} />
+                            : <DownloadOutlinedIcon sx={{ fontSize: 11 }} />
+                        }
+                        sx={{ ...utilBtnBase, ...fullWidth, flex: 1, height: "100%" }}
+                      >
+                        {folderDownloading ? "Saving…" : (activeFolderName ?? "Download")}
+                      </Button>
+                    </Box>
+                  </Tooltip>
                 </Box>
               </Box>
 
@@ -827,24 +912,25 @@ const Dashboard = () => {
       {showDashboardHeader && (
         <Box display="flex" justifyContent="space-between" alignItems="center" mb={isCompactLandscape ? "5px" : "12px"}>
           <Header title="DASHBOARD" subtitle="Welcome to your dashboard" />
-          <Box>
-            <Button
-              onClick={downloadDeviceData}
-              sx={{
-                backgroundColor: colors.blueAccent[700],
-                color: colors.grey[100],
-                fontSize: "clamp(11px, 1.2vw, 14px)",
-                fontWeight: "bold",
-                padding: { xs: "8px 12px", sm: "10px 20px" },
-                minWidth: 0,
-              }}
-            >
-              <DownloadOutlinedIcon sx={{ mr: { xs: 0, sm: "10px" } }} />
-              <Box component="span" sx={{ display: { xs: "none", sm: "inline" } }}>
-                Download Reports
-              </Box>
-            </Button>
-          </Box>
+          {/* Emergency stop in the header — always visible for quick access. */}
+          <Button
+            onClick={handleEmergencyStop}
+            startIcon={<StopIcon sx={{ color: "#fff" }} />}
+            sx={{
+              fontSize: "clamp(11px, 1.1vw, 14px)",
+              padding: "10px 12px",
+              fontWeight: 600,
+              textTransform: "none",
+              whiteSpace: "nowrap",
+              minWidth: 0,
+              color: "#fff",
+              border: "1px solid #c62828",
+              backgroundColor: "#c62828",
+              "&:hover": { backgroundColor: "#b71c1c" },
+            }}
+          >
+            E-STOP
+          </Button>
         </Box>
       )}
 
