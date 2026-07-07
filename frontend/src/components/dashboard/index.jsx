@@ -200,6 +200,10 @@ const Dashboard = () => {
   // reTerminal and similar wide-but-short screens (1280x720).
   // Requires width >= 1025 so it doesn't clash with isSevenInchDisplay.
   const isCompactLandscape  = useMediaQuery("(min-width:1025px) and (max-height:760px)");
+  // iPad landscape (1180x820, and neighboring iPad landscape sizes like 1194x834).
+  // Wider than a 7-inch panel, taller than reTerminal (>760px), so it needs its own tier
+  // rather than falling through to the desktop/large-screen layout and overflowing.
+  const isIpadLandscape     = useMediaQuery("(min-width:1080px) and (max-width:1300px) and (min-height:761px) and (max-height:900px)");
 
   // ─── Typography ─────────────────────────────────────────────────────────────
   const titleFontSize = isSmallScreen
@@ -208,6 +212,8 @@ const Dashboard = () => {
     ? "13px"
     : isSevenInchDisplay
     ? "15px"
+    : isIpadLandscape
+    ? "16px"
     : isMediumScreen
     ? "16px"
     : isLargeScreen
@@ -227,6 +233,8 @@ const Dashboard = () => {
     ? "8px"
     : isSevenInchDisplay
     ? "10px"
+    : isIpadLandscape
+    ? "12px"
     : "20px";
 
   const dashboardGridGap = isExtraSmallScreen
@@ -237,6 +245,8 @@ const Dashboard = () => {
     ? "8px"
     : isSevenInchDisplay
     ? "12px"
+    : isIpadLandscape
+    ? "10px"
     : "20px";
 
   // reTerminal 1280x720 target layout (8px margin each side, 8px gap):
@@ -247,10 +257,19 @@ const Dashboard = () => {
   //
   //   Total grid height: 70 + 8 + 226 + 8 + 148 = 460px   <- fits in 720-16=704px ✓
   //   (rows + gaps: 6 rows + 5 gaps = 6x70 + 5x8 = 460px)
+  // iPad landscape 1180x820 target layout (12px margin each side, 10px gap):
+  //
+  //   Charts side-by-side : 4 rows x 112px = 448px + 3x10 gap =  478px
+  //   Printer + camera    : 2 rows x 112px = 224px + 1x10 gap =  234px
+  //
+  //   Total grid height: 478 + 10 (row gap between chart block and control block) + 234 = 722px
+  //   Plus ~24px margin (12 top + 12 bottom) + ~50px header = 796px  <- fits in 820px ✓
   const dashboardGridAutoRows = isCompactLandscape
     ? "minmax(70px, auto)"
     : isSevenInchDisplay
     ? "minmax(118px, auto)"
+    : isIpadLandscape
+    ? "minmax(112px, auto)"
     : isFiveInch
     ? "minmax(82px, auto)"
     : isSmallScreen
@@ -343,8 +362,8 @@ const Dashboard = () => {
     setBoxes((prev) => prev.filter((b) => b.id !== id));
   };
 
-  const chartHeaderMt = isCompactLandscape ? "4px"  : isExtraSmallScreen ? "6px"  : isSmallScreen ? "10px" : "18px";
-  const chartHeaderPx = isCompactLandscape ? "10px" : isExtraSmallScreen ? "8px"  : isSmallScreen ? "14px" : "24px";
+  const chartHeaderMt = isCompactLandscape ? "4px"  : isExtraSmallScreen ? "6px"  : isSmallScreen ? "10px" : isIpadLandscape ? "6px" : "18px";
+  const chartHeaderPx = isCompactLandscape ? "10px" : isExtraSmallScreen ? "8px"  : isSmallScreen ? "14px" : isIpadLandscape ? "16px" : "24px";
 
   const [boxes, setBoxes] = useState([
     { id: 9,  gridColumn: "span 7",  gridRow: "span 2", content: null },
@@ -389,36 +408,36 @@ const Dashboard = () => {
         </Box>
       ),
     },
-    {
-      id: 3,
-      content: (
-        <StatBox
-          measurementColor="#006666"
-          title="Displacement Avg"
-          subtitle="— cm"
-        />
-      ),
-      gridColumn: "span 6",
-      gridRow: "span 1",
-      lineColor: "#009688",
-      areaColor: "rgba(0,150,136,0.2)",
-      data: [],
-    },
-    {
-      id: 4,
-      content: (
-        <StatBox
-          measurementColor="#D35400"
-          title="Force Avg"
-          subtitle={`— ${FORCE_UNIT}`}
-        />
-      ),
-      gridColumn: "span 6",
-      gridRow: "span 1",
-      lineColor: "#FF9800",
-      areaColor: "rgba(255,152,0,0.2)",
-      data: [],
-    },
+    // {
+    //   id: 3,
+    //   content: (
+    //     <StatBox
+    //       measurementColor="#006666"
+    //       title="Displacement Avg"
+    //       subtitle="— cm"
+    //     />
+    //   ),
+    //   gridColumn: "span 6",
+    //   gridRow: "span 1",
+    //   lineColor: "#009688",
+    //   areaColor: "rgba(0,150,136,0.2)",
+    //   data: [],
+    // },
+    // {
+    //   id: 4,
+    //   content: (
+    //     <StatBox
+    //       measurementColor="#D35400"
+    //       title="Force Avg"
+    //       subtitle={`— ${FORCE_UNIT}`}
+    //     />
+    //   ),
+    //   gridColumn: "span 6",
+    //   gridRow: "span 1",
+    //   lineColor: "#FF9800",
+    //   areaColor: "rgba(255,152,0,0.2)",
+    //   data: [],
+    // },
   ]);
 
   const updatedBoxes = boxes.map((box) => {
@@ -793,34 +812,34 @@ const Dashboard = () => {
       };
     }
 
-    if (box.id === 3) {
-      // Computes the mean of all displacement values currently in the buffer.
-      return {
-        ...box,
-        data: dashboardData.displacementSeries,
-        content: (
-          <StatBox
-            title="Displacement Avg"
-            subtitle={dashboardData.displacementAvg !== null ? `${dashboardData.displacementAvg.toFixed(2)} cm` : "—"}
-            icon={<SwapHorizIcon style={{ color: "#009688", fontSize: isCompactLandscape ? 18 : 28 }} />}
-          />
-        ),
-      };
-    }
-    if (box.id === 4) {
-      // Computes the mean of all force values currently in the buffer.
-      return {
-        ...box,
-        data: dashboardData.forceSeries,
-        content: (
-          <StatBox
-            title="Force Avg"
-            subtitle={dashboardData.forceAvg !== null ? `${dashboardData.forceAvg.toFixed(2)} ${FORCE_UNIT}` : "—"}
-            icon={<BoltIcon style={{ color: "#FF9800", fontSize: isCompactLandscape ? 18 : 28 }} />}
-          />
-        ),
-      };
-    }
+    // if (box.id === 3) {
+    //   // Computes the mean of all displacement values currently in the buffer.
+    //   return {
+    //     ...box,
+    //     data: dashboardData.displacementSeries,
+    //     content: (
+    //       <StatBox
+    //         title="Displacement Avg"
+    //         subtitle={dashboardData.displacementAvg !== null ? `${dashboardData.displacementAvg.toFixed(2)} cm` : "—"}
+    //         icon={<SwapHorizIcon style={{ color: "#009688", fontSize: isCompactLandscape ? 18 : 28 }} />}
+    //       />
+    //     ),
+    //   };
+    // }
+    // if (box.id === 4) {
+    //   // Computes the mean of all force values currently in the buffer.
+    //   return {
+    //     ...box,
+    //     data: dashboardData.forceSeries,
+    //     content: (
+    //       <StatBox
+    //         title="Force Avg"
+    //         subtitle={dashboardData.forceAvg !== null ? `${dashboardData.forceAvg.toFixed(2)} ${FORCE_UNIT}` : "—"}
+    //         icon={<BoltIcon style={{ color: "#FF9800", fontSize: isCompactLandscape ? 18 : 28 }} />}
+    //       />
+    //     ),
+    //   };
+    // }
 
     return box;
   });
@@ -832,6 +851,11 @@ const Dashboard = () => {
 
     // reTerminal 1280x720 landscape
     const isCompactLandscapeLayout = sw >= 1025 && sh <= 760;
+    // iPad landscape (1180x820 and similar iPad landscape sizes): wide enough for
+    // side-by-side charts like reTerminal, but taller — falls outside isCompactLandscapeLayout
+    // (sh > 760) so it needs its own check or it would fall through to the full-desktop
+    // stacked-chart layout and overflow the 820px viewport.
+    const isIpadLandscapeLayout     = sw >= 1080 && sw <= 1300 && sh >= 761 && sh <= 900;
     // Smaller 7-inch landscape panels
     const isCompactPanel            = sw <= 1024 && sh <= 700;
     const isMobile                  = sw <= 800;
@@ -842,21 +866,22 @@ const Dashboard = () => {
       // ── Stat + control widgets (1, 2, 3, 4) ───────────────────────────────
       // Boxes 1 and 2 merged into box 9 — only stat boxes 3 and 4 remain in the top row.
       // Two boxes fill 12 columns: each spans 6 on all layouts, full-width on small mobile.
-      if ([3, 4].includes(box.id)) {
-        return {
-          ...box,
-          gridColumn: isMobile ? "span 12" : "span 6",
-          gridRow: isMobile ? "span 2" : "span 1",
-        };
-      }
+      // if ([3, 4].includes(box.id)) {
+      //   return {
+      //     ...box,
+      //     gridColumn: isMobile ? "span 12" : "span 6",
+      //     gridRow: isMobile ? "span 2" : "span 1",
+      //   };
+      // }
 
       // ── Charts (7, 8) ──────────────────────────────────────────────────────
       if (box.id === 7 || box.id === 8) {
         return {
           ...box,
-          // KEY: side-by-side on compact landscape → two charts each ~620px wide
-          gridColumn: isCompactLandscapeLayout ? "span 6" : "span 12",
+          // KEY: side-by-side on compact landscape / iPad landscape → two charts sharing a row
+          gridColumn: (isCompactLandscapeLayout || isIpadLandscapeLayout) ? "span 6" : "span 12",
           gridRow:    isCompactLandscapeLayout ? "span 3"
+                    : isIpadLandscapeLayout    ? "span 4"
                     : isFiveInchLayout         ? "span 4"
                     : isMobile                 ? "span 4"
                     : isCompactPanel           ? "span 3"
@@ -868,12 +893,12 @@ const Dashboard = () => {
       if (box.id === 9) {
         return {
           ...box,
-          // Compact landscape: narrowed to span 7 to give Camera View more room.
-          gridColumn: isCompactLandscapeLayout ? "span 7"
+          // Compact landscape / iPad landscape: narrowed to span 7 to give Camera View more room.
+          gridColumn: (isCompactLandscapeLayout || isIpadLandscapeLayout) ? "span 7"
                     : isMobile                 ? "span 12"
                     : isCompactPanel           ? "span 12"
                     :                           "span 8",
-          gridRow:    isCompactLandscapeLayout ? "span 2"
+          gridRow:    (isCompactLandscapeLayout || isIpadLandscapeLayout) ? "span 2"
                     : isFiveInchLayout         ? "span 4"
                     : isMobile                 ? "span 3"
                     :                           "span 2",
@@ -884,12 +909,12 @@ const Dashboard = () => {
       if (box.id === 10) {
         return {
           ...box,
-          // Compact landscape: widened to span 5 for a larger live-feed area.
-          gridColumn: isCompactLandscapeLayout ? "span 5"
+          // Compact landscape / iPad landscape: widened to span 5 for a larger live-feed area.
+          gridColumn: (isCompactLandscapeLayout || isIpadLandscapeLayout) ? "span 5"
                     : isMobile                 ? "span 12"
                     : isCompactPanel           ? "span 12"
                     :                           "span 4",
-          gridRow:    isCompactLandscapeLayout ? "span 2"
+          gridRow:    (isCompactLandscapeLayout || isIpadLandscapeLayout) ? "span 2"
                     : isFiveInchLayout         ? "span 4"
                     : isMobile                 ? "span 3"
                     : isCompactPanel           ? "span 3"
@@ -910,7 +935,7 @@ const Dashboard = () => {
   return (
     <Box m={dashboardOuterMargin}>
       {showDashboardHeader && (
-        <Box display="flex" justifyContent="space-between" alignItems="center" mb={isCompactLandscape ? "5px" : "12px"}>
+        <Box display="flex" justifyContent="space-between" alignItems="center" mb={isCompactLandscape ? "5px" : isIpadLandscape ? "8px" : "12px"}>
           <Header title="DASHBOARD" subtitle="Welcome to your dashboard" />
           {/* Emergency stop in the header — always visible for quick access. */}
           <Button
