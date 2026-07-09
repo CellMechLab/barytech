@@ -20,8 +20,8 @@ import { useState, useCallback, useRef, useContext, useEffect, useMemo } from "r
 import DraggableBox from "./DraggableBox";
 import { WebSocketContext } from "./WebSocketProvider";
 import usePrinterControls from "./hooks/usePrinterControls";
-import useDeviceDataExport from "./hooks/useDeviceDataExport";
 import { useSave } from "../../context/SaveContext";
+import ExportFolderModal from "../ExportFolderModal";
 import { BACKEND_BASE_URL, VIDEO_BASE_URL } from "../../config/endpoints";
 import { toast } from "sonner";
 import BoltIcon from "@mui/icons-material/Bolt";
@@ -51,8 +51,10 @@ const Dashboard = () => {
 
   // Folder list fetched on mount so the download button can show the active folder name.
   const [folders, setFolders] = useState([]);
-  // True while the folder HDF5 download request is in flight.
-  const [folderDownloading, setFolderDownloading] = useState(false);
+  // True while HDF5 export is in progress inside the metadata modal.
+  const [folderExporting, setFolderExporting] = useState(false);
+  // Controls visibility of the export metadata confirmation modal.
+  const [exportModalOpen, setExportModalOpen] = useState(false);
 
   // Fetch folders once on mount using the same auth pattern as FolderSelector.
   useEffect(() => {
@@ -71,20 +73,6 @@ const Dashboard = () => {
     };
     loadFolders();
   }, []);
-
-  // Hook that provides the folder-scoped HDF5 download helper.
-  const { downloadFolderData } = useDeviceDataExport(backendApiUrl);
-
-  // Trigger an HDF5 download for the currently active folder.
-  const handleFolderDownload = async () => {
-    if (!activeFolderId) return;
-    setFolderDownloading(true);
-    try {
-      await downloadFolderData(activeFolderId);
-    } finally {
-      setFolderDownloading(false);
-    }
-  };
 
   // Derives a display label from the folders list for the download button.
   const activeFolderName = activeFolderId
@@ -753,16 +741,16 @@ const Dashboard = () => {
                       sx={{ display: "flex", width: "100%", minHeight: btnMinH, height: "100%", alignSelf: "stretch" }}
                     >
                       <Button
-                        disabled={!activeFolderId || folderDownloading}
-                        onClick={handleFolderDownload}
+                        disabled={!activeFolderId || folderExporting}
+                        onClick={() => setExportModalOpen(true)}
                         startIcon={
-                          folderDownloading
+                          folderExporting
                             ? <CircularProgress size={11} sx={{ color: colors.grey[100] }} />
                             : <DownloadOutlinedIcon sx={{ fontSize: 11 }} />
                         }
                         sx={{ ...utilBtnBase, ...fullWidth, flex: 1, height: "100%" }}
                       >
-                        {folderDownloading ? "Saving…" : (activeFolderName ?? "Download")}
+                        {folderExporting ? "Exporting…" : (activeFolderName ?? "Download")}
                       </Button>
                     </Box>
                   </Tooltip>
@@ -983,6 +971,15 @@ const Dashboard = () => {
           </DraggableBox>
         ))}
       </Box>
+
+      <ExportFolderModal
+        open={exportModalOpen}
+        onClose={() => setExportModalOpen(false)}
+        folderId={activeFolderId}
+        folderName={activeFolderName}
+        colors={colors}
+        onExportingChange={setFolderExporting}
+      />
     </Box>
   );
 };

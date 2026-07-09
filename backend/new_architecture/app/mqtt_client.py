@@ -35,6 +35,28 @@ def to_float_or_none(value):
         return None
     return number
 
+def to_int_or_none(value):
+    """Parse an integer flag (0/1) from MQTT payloads, or None when invalid."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number
+
+def to_phase_or_default(value):
+    """Normalize phase to 0 (indent) or 1 (retract); default to indent when missing."""
+    parsed = to_int_or_none(value)
+    if parsed in (0, 1):
+        return parsed
+    return 0
+
+def to_motor_flag_or_default(value):
+    """Normalize motor_working to 0 (idle) or 1 (moving); default to idle when missing."""
+    parsed = to_int_or_none(value)
+    if parsed in (0, 1):
+        return parsed
+    return 0
+
 def normalize_data_point(data_point):
     """Return a canonical telemetry payload, or None for non-telemetry messages."""
     if not isinstance(data_point, dict):
@@ -61,6 +83,22 @@ def normalize_data_point(data_point):
         if first_defined_value(data_point, ["force", "Force", "force_mN", "force_N", "force_n", "Force_mN", "Force_N"]) is not None
         else first_defined_value(state, ["force", "Force", "force_mN", "force_N", "force_n", "Force_mN", "Force_N"])
     )
+    # Phase: 0 = indenting (segment0), 1 = retracting (segment1).
+    phase_raw = first_defined_value(
+        data_point,
+        ["phase", "Phase", "segment", "segment_type", "segmentType"],
+    )
+    if phase_raw is None:
+        phase_raw = first_defined_value(state, ["phase", "Phase", "segment", "segment_type"])
+    phase = to_phase_or_default(phase_raw)
+    # Motor activity flag: 0 = idle, 1 = moving.
+    motor_raw = first_defined_value(
+        data_point,
+        ["motor_working", "motorWorking", "motor", "motor_active", "motorActive"],
+    )
+    if motor_raw is None:
+        motor_raw = first_defined_value(state, ["motor_working", "motorWorking", "motor"])
+    motor_working = to_motor_flag_or_default(motor_raw)
 
     if displacement is None and force is None:
         return None
@@ -70,6 +108,8 @@ def normalize_data_point(data_point):
     normalized["timestamp"] = first_defined_value(data_point, ["timestamp", "time", "t"]) or first_defined_value(state, ["timestamp", "time", "t"]) or datetime_utc_iso()
     normalized["displacement"] = displacement
     normalized["force"] = force
+    normalized["phase"] = phase
+    normalized["motor_working"] = motor_working
     return normalized
 
 def datetime_utc_iso():

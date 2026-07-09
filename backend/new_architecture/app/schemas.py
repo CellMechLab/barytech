@@ -37,6 +37,10 @@ class DeviceDataResponse(BaseModel):
     timestamp: datetime = Field(..., description="Time the data was recorded")
     displacement: float = Field(..., description="Displacement value recorded by the device")
     force: float = Field(..., description="Force value recorded by the device")
+    # Indentation phase: 0 = indent, 1 = retract.
+    phase: int = 0
+    # Motor activity flag: 0 = idle, 1 = moving.
+    motor_working: int = 0
 
     class Config:
         from_attributes = True # Enable ORM mode to work with SQLAlchemy models
@@ -69,9 +73,41 @@ class FolderResponse(BaseModel):
     curve_count: int = 0
     # Total number of device_data rows across all curves in this folder.
     row_count: int = 0
+    # Experiment-wide metadata shared by all curves in this folder.
+    velocity: Optional[float] = None
+    force_conversion_factor: Optional[float] = None
+    z_conversion_factor: Optional[float] = None
+    spring_constant: Optional[float] = None
+    tip_geometry: Optional[str] = None
+    tip_radius: Optional[float] = None
+    sampling_rate: Optional[float] = None
 
     class Config:
         from_attributes = True
+
+
+class FolderMetadataUpdate(BaseModel):
+    """Payload for updating experiment-wide folder metadata before HDF5 export."""
+    velocity: Optional[float] = None
+    force_conversion_factor: Optional[float] = None
+    z_conversion_factor: Optional[float] = None
+    spring_constant: Optional[float] = None
+    tip_geometry: Optional[str] = None
+    tip_radius: Optional[float] = None
+    sampling_rate: Optional[float] = None
+
+
+class FolderExportMetadataResponse(BaseModel):
+    """Resolved metadata that will be embedded in the exported HDF5 tip groups."""
+    folder_id: int
+    folder_name: str
+    velocity: float
+    force_conversion_factor: float
+    z_conversion_factor: float
+    spring_constant: float
+    tip_geometry: str
+    tip_radius: float
+    sampling_rate: float
 
 
 class CurveInfo(BaseModel):
@@ -100,6 +136,10 @@ class DeviceDataRowResponse(BaseModel):
     folder_id: Optional[int] = None
     # Zero-based index of the save-cycle within the folder.
     curve_index: int = 0
+    # Indentation phase: 0 = indent (segment0), 1 = retract (segment1).
+    phase: int = 0
+    # Motor activity flag: 0 = idle, 1 = moving.
+    motor_working: int = 0
 
     class Config:
         from_attributes = True

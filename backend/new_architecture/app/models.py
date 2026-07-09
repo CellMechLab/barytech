@@ -20,6 +20,14 @@ class Folder(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     # UTC timestamp recorded when the folder was first created.
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Experiment-wide metadata shared by all curves in this folder (HDF5 tip export).
+    velocity = Column(Float, nullable=True)
+    force_conversion_factor = Column(Float, nullable=True)
+    z_conversion_factor = Column(Float, nullable=True)
+    spring_constant = Column(Float, nullable=True)
+    tip_geometry = Column(String, nullable=True)
+    tip_radius = Column(Float, nullable=True)
+    sampling_rate = Column(Float, nullable=True)
 
     # ORM back-reference to the owning User row.
     user = relationship("User", back_populates="folders")
@@ -39,6 +47,10 @@ class DeviceData(Base):
     folder_id = Column(Integer, ForeignKey("folders.id"), nullable=True, index=True)
     # Zero-based index of the save-cycle (ON→OFF) within the folder this row was recorded during.
     curve_index = Column(Integer, default=0, nullable=False)
+    # Indentation phase: 0 = approaching/indenting (segment0), 1 = retracting (segment1).
+    phase = Column(Integer, default=0, nullable=False)
+    # Motor activity flag from device telemetry: 0 = idle, 1 = moving.
+    motor_working = Column(Integer, default=0, nullable=False)
 
     # Relationship with IoTDevice
     device = relationship("IoTDevice", back_populates="data")

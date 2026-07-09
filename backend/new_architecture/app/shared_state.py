@@ -17,3 +17,6 @@ current_curve_index: int = 0
 # In-memory counter: folder_id → number of ON→OFF save cycles completed so far.
 # Incremented on every False→True transition so each new save gets a fresh index.
 folder_curve_index_map: Dict[int, int] = {}
+
+# Optional metadata dict for the active folder/experiment (velocity, conversion factors, tip params).
+current_folder_metadata: Optional[dict] = None

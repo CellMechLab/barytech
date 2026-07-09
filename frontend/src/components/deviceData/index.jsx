@@ -3,7 +3,16 @@
 // flat array that MUI DataGrid expects, inserting synthetic folder/curve header
 // rows and expanding/collapsing them on click without any Pro licence.
 import React, { useEffect, useState, useMemo, useCallback } from "react";
-import { Box, Button, CircularProgress, IconButton, MenuItem, Select, Typography, Chip } from "@mui/material";
+import {
+  Box,
+  Button,
+  CircularProgress,
+  IconButton,
+  MenuItem,
+  Select,
+  Typography,
+  Chip,
+} from "@mui/material";
 import { DataGrid, GridToolbarQuickFilter } from "@mui/x-data-grid";
 import DeleteIcon from "@mui/icons-material/Delete";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
@@ -16,6 +25,7 @@ import axios from "axios";
 import { toast, Toaster } from "sonner";
 import { useNavigate } from "react-router-dom";
 import { buildBackendUrl } from "../../config/endpoints";
+import ExportFolderModal from "../ExportFolderModal";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -51,60 +61,16 @@ const curveKey = (folderId, curveIndex) =>
 const DeviceDataToolbar = ({ folders, colors }) => {
   // ID of the folder selected for download; empty string = no selection.
   const [selectedFolderId, setSelectedFolderId] = useState("");
-  // True while the HDF5 download fetch is in flight.
-  const [downloading, setDownloading] = useState(false);
+  // True while HDF5 export is in progress inside the modal.
+  const [exporting, setExporting] = useState(false);
+  // Controls visibility of the export metadata confirmation modal.
+  const [exportModalOpen, setExportModalOpen] = useState(false);
 
   // Derive the folder name so the downloaded file uses the correct filename.
   const selectedFolder = folders.find((f) => String(f.id) === String(selectedFolderId));
 
-  const handleDownload = async () => {
-    if (!selectedFolderId) return;
-    setDownloading(true);
-    try {
-      // Reads the JWT stored at login so the export endpoint scopes data to this user.
-      const token = sessionStorage.getItem("authToken");
-      const res = await fetch(buildBackendUrl(`/api/export/folder/${selectedFolderId}`), {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      if (!res.ok) {
-        // Extract the backend's detail message so the user sees the real reason.
-        let detail = `Export failed (${res.status})`;
-        try {
-          const errBody = await res.json();
-          if (errBody?.detail) detail = errBody.detail;
-        } catch (_) {}
-        throw new Error(detail);
-      }
-
-      // Extract server-supplied filename from Content-Disposition or fall back to folder name.
-      const disposition = res.headers.get("Content-Disposition") ?? "";
-      const match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-      const filename = match
-        ? match[1].replace(/['"]/g, "")
-        : `${selectedFolder?.name ?? `folder_${selectedFolderId}`}.hdf5`;
-
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      // Release the temporary object URL to free browser memory.
-      window.URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error("[DeviceDataToolbar] download failed:", err);
-      toast.error(err.message || "Failed to download HDF5. Please try again.", {
-        style: { backgroundColor: "red", color: "white" },
-      });
-    } finally {
-      setDownloading(false);
-    }
-  };
-
   return (
+    <>
     <Box display="flex" alignItems="center" gap="12px" p="4px 8px">
       {/* Folder selector for export */}
       <Select
@@ -151,14 +117,14 @@ const DeviceDataToolbar = ({ folders, colors }) => {
         ))}
       </Select>
 
-      {/* HDF5 download button */}
+      {/* HDF5 download button — opens metadata confirmation modal first */}
       <Button
         variant="contained"
         size="small"
-        disabled={selectedFolderId === "" || downloading}
-        onClick={handleDownload}
+        disabled={selectedFolderId === "" || exporting}
+        onClick={() => setExportModalOpen(true)}
         startIcon={
-          downloading
+          exporting
             ? <CircularProgress size={14} sx={{ color: "inherit" }} />
             : <FileDownloadIcon />
         }
@@ -187,6 +153,16 @@ const DeviceDataToolbar = ({ folders, colors }) => {
         />
       </Box>
     </Box>
+
+    <ExportFolderModal
+      open={exportModalOpen}
+      onClose={() => setExportModalOpen(false)}
+      folderId={selectedFolderId || null}
+      folderName={selectedFolder?.name}
+      colors={colors}
+      onExportingChange={setExporting}
+    />
+    </>
   );
 };
 

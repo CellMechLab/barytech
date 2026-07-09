@@ -6,6 +6,7 @@ from app.schemas import (
     IoTDeviceCreate, IoTDeviceResponse, DeviceDataResponse,
     FolderCreate, FolderResponse, CurveInfo,
     DeviceDataRowResponse, GroupedCurveResponse, GroupedFolderResponse,
+    FolderMetadataUpdate, FolderExportMetadataResponse,
 )
 from app.models import IoTDevice, DeviceData, Folder
 from app.db import get_db
@@ -149,6 +150,8 @@ async def get_device_data_grouped(
                         force=r.force,
                         folder_id=r.folder_id,
                         curve_index=r.curve_index if r.curve_index is not None else 0,
+                        phase=r.phase if r.phase is not None else 0,
+                        motor_working=r.motor_working if r.motor_working is not None else 0,
                     )
                     for r in rows
                 ],
@@ -253,7 +256,7 @@ async def delete_device_data(
 from fastapi.responses import FileResponse
 import os
 from datetime import datetime
-from app.db import export_device_data_to_hdf5, export_folder_to_hdf5
+from app.db import export_device_data_to_hdf5, export_folder_to_hdf5, upsert_folder_metadata, get_folder_export_metadata
 
 # ── Legacy single-curve export (kept for backward compatibility) ──────────────
 
@@ -354,9 +357,67 @@ async def list_folders(
                     created_at=folder.created_at,
                     curve_count=curve_count,
                     row_count=row_count,
+                    velocity=folder.velocity,
+                    force_conversion_factor=folder.force_conversion_factor,
+                    z_conversion_factor=folder.z_conversion_factor,
+                    spring_constant=folder.spring_constant,
+                    tip_geometry=folder.tip_geometry,
+                    tip_radius=folder.tip_radius,
+                    sampling_rate=folder.sampling_rate,
                 )
             )
         return folders
+
+
+@router.get("/folders/{folder_id}/export-metadata", response_model=FolderExportMetadataResponse)
+async def get_folder_export_metadata_route(
+    folder_id: int,
+    user_id: int = Depends(get_current_user_id),
+):
+    """Return resolved experiment metadata that will be written into HDF5 tip groups."""
+    async with get_db() as db:
+        folder_result = await db.execute(
+            select(Folder).where(Folder.id == folder_id, Folder.user_id == user_id)
+        )
+        folder = folder_result.scalars().first()
+        if not folder:
+            raise HTTPException(status_code=404, detail="Folder not found or not authorized.")
+
+        metadata = get_folder_export_metadata(folder)
+        return FolderExportMetadataResponse(
+            folder_id=folder.id,
+            folder_name=folder.name,
+            **metadata,
+        )
+
+
+@router.patch("/folders/{folder_id}/metadata", response_model=FolderExportMetadataResponse)
+async def update_folder_metadata(
+    folder_id: int,
+    payload: FolderMetadataUpdate,
+    user_id: int = Depends(get_current_user_id),
+):
+    """Save experiment metadata on a folder before HDF5 export."""
+    async with get_db() as db:
+        folder_result = await db.execute(
+            select(Folder).where(Folder.id == folder_id, Folder.user_id == user_id)
+        )
+        folder = folder_result.scalars().first()
+        if not folder:
+            raise HTTPException(status_code=404, detail="Folder not found or not authorized.")
+
+        await upsert_folder_metadata(db, folder_id, payload.model_dump(exclude_unset=True))
+
+        refreshed = await db.execute(
+            select(Folder).where(Folder.id == folder_id, Folder.user_id == user_id)
+        )
+        folder = refreshed.scalars().first()
+        metadata = get_folder_export_metadata(folder)
+        return FolderExportMetadataResponse(
+            folder_id=folder.id,
+            folder_name=folder.name,
+            **metadata,
+        )
 
 
 @router.delete("/folders/{folder_id}")

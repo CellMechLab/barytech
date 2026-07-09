@@ -233,8 +233,24 @@ async def websocket_endpoint(websocket: WebSocket):
                     new_save_flag = params.get("save", False)
                     # Folder the frontend wants to record into; None means legacy behaviour.
                     new_folder_id = params.get("folder_id", None)
+                    # Optional metadata for HDF5 tip export (velocity, conversion factors, etc.).
+                    save_metadata = params.get("metadata")
                     print(f"Save flag received: {new_save_flag}, folder_id: {new_folder_id}")
-                    handle_save_flag(new_save_flag, new_folder_id)
+                    handle_save_flag(new_save_flag, new_folder_id, save_metadata)
+                    # Persist metadata immediately on save start so export works even with sparse telemetry.
+                    if (
+                        new_save_flag
+                        and new_folder_id is not None
+                        and isinstance(save_metadata, dict)
+                        and save_metadata
+                    ):
+                        from app.db import upsert_folder_metadata
+                        async with get_db() as db:
+                            await upsert_folder_metadata(
+                                db,
+                                new_folder_id,
+                                save_metadata,
+                            )
                 
                 else:
                     print(f"Unknown message type: {message_type}")
@@ -364,7 +380,7 @@ async def printer_status_ws(websocket: WebSocket):
         push_task.cancel()
 
 
-def handle_save_flag(flag: bool, folder_id=None):
+def handle_save_flag(flag: bool, folder_id=None, metadata=None):
     """
     Update the global save state.
 
@@ -372,6 +388,8 @@ def handle_save_flag(flag: bool, folder_id=None):
     incremented so every new save session records into a distinct curve slot.
     folder_id is stored globally so message_processor can stamp rows without
     the WebSocket context being passed all the way down the call stack.
+    Optional metadata (velocity, conversion factors, tip params) is stored
+    on the folder so all curves in the experiment share the same HDF5 tip attrs.
     """
     import app.shared_state as state
 
@@ -383,6 +401,8 @@ def handle_save_flag(flag: bool, folder_id=None):
     if flag:
         # Remember which folder this save session targets.
         state.current_folder_id = folder_id
+        # Store optional experiment metadata for the active folder save session.
+        state.current_folder_metadata = metadata if isinstance(metadata, dict) else None
 
         if is_rising_edge and folder_id is not None:
             # Increment the curve counter for this folder on each new ON press.

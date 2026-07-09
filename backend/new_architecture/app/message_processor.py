@@ -289,6 +289,9 @@ async def process_batch(device_id: str, batch: list):
                     # Stamp every row with the folder and curve it belongs to.
                     "folder_id": batch_folder_id,
                     "curve_index": batch_curve_index,
+                    # phase 0 = indent/segment0, phase 1 = retract/segment1.
+                    "phase": msg.get("phase", 0),
+                    "motor_working": msg.get("motor_working", 0),
                 })
 
             # Bulk insert
