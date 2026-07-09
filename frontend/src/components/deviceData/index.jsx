@@ -53,6 +53,16 @@ const folderKey = (folderId) =>
 const curveKey = (folderId, curveIndex) =>
   `curve-${folderId ?? "null"}-${curveIndex}`;
 
+// Returns true when an id belongs to a selectable data row (not folder/curve header).
+const isDataRowId = (id) => {
+  if (typeof id === "number" && Number.isFinite(id)) return true;
+  if (typeof id === "string" && /^\d+$/.test(id)) return true;
+  return false;
+};
+
+// Normalizes a data-row id to the integer expected by the delete API.
+const normalizeDataRowId = (id) => (typeof id === "string" ? Number(id) : id);
+
 // ── Custom toolbar ────────────────────────────────────────────────────────────
 // Rendered inside the DataGrid toolbar slot. Receives folders list and theme
 // tokens as props because the toolbar is defined outside DeviceDataTable and
@@ -178,7 +188,7 @@ const DeviceDataTable = () => {
   const [groupedApiData, setGroupedApiData] = useState([]);
   // True while the initial or post-delete fetch is in flight.
   const [loading, setLoading] = useState(true);
-  // IDs of selected data rows (integers only — folder/curve rows are excluded).
+  // IDs of selected data rows; may be numbers or numeric strings from DataGrid.
   const [selectionModel, setSelectionModel] = useState([]);
 
   // Set of folder row IDs (e.g. "folder-3") that are currently collapsed.
@@ -322,7 +332,7 @@ const DeviceDataTable = () => {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        data: { ids: selectionModel },
+        data: { ids: selectionModel.map(normalizeDataRowId) },
       });
 
       toast.success("Selected rows deleted successfully!", {
@@ -399,9 +409,8 @@ const DeviceDataTable = () => {
   // ── Selection: only integer data-row IDs reach the selection model ──────────
 
   const handleSelectionChange = useCallback((ids) => {
-    // DataGrid passes string IDs for folder/curve rows and numbers for data rows.
-    // Filter to only numeric IDs so group rows are never included.
-    const dataIds = ids.filter((id) => typeof id === "number");
+    // Keep ids in the same shape DataGrid emits so controlled checkboxes stay in sync.
+    const dataIds = ids.filter(isDataRowId);
     setSelectionModel(dataIds);
   }, []);
 
@@ -676,6 +685,7 @@ const DeviceDataTable = () => {
           rows={flatRows}
           columns={columns}
           checkboxSelection
+          disableRowSelectionOnClick
           // Prevent folder and curve rows from being checked.
           isRowSelectable={(params) => !!params.row.isData}
           rowSelectionModel={selectionModel}

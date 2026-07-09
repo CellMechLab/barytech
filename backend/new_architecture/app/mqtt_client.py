@@ -6,6 +6,7 @@ import os
 import time
 import queue
 import orjson
+from app.debug_log import debug_log
 from app.metrics import record_mqtt_message, record_message_type, record_e2e_latency, update_system_health
 
 mqtt_client = None
@@ -153,17 +154,17 @@ class MessageCounters:
         stats = self.get_stats()
         # Guard against division-by-zero when no messages have been received yet
         success_rate = (stats['mqtt_parsed'] / stats['mqtt_received'] * 100) if stats['mqtt_received'] > 0 else 0.0
-        print(f"\n📊 MESSAGE PROCESSING STATS:")
-        print(f"   MQTT Received: {stats['mqtt_received']} ({stats['mqtt_rate']:.1f}/sec)")
-        print(f"   MQTT Parsed: {stats['mqtt_parsed']} ({success_rate:.1f}% success)")
-        print(f"   MQTT Errors: {stats['mqtt_errors']}")
-        print(f"   Device Queued: {stats['device_queued']}")
-        print(f"   Device Processed: {stats['device_processed']} ({stats['processing_rate']:.1f}/sec)")
-        print(f"   Broadcast Sent: {stats['broadcast_sent']} ({stats['broadcast_rate']:.1f}/sec)")
-        print(f"   Broadcast Errors: {stats['broadcast_errors']}")
-        print(f"   DB Saved: {stats['db_saved']} ({stats['db_rate']:.1f}/sec)")
-        print(f"   DB Errors: {stats['db_errors']}")
-        print(f"   Elapsed Time: {stats['elapsed_time']:.1f} seconds")
+        debug_log(f"\n📊 MESSAGE PROCESSING STATS:")
+        debug_log(f"   MQTT Received: {stats['mqtt_received']} ({stats['mqtt_rate']:.1f}/sec)")
+        debug_log(f"   MQTT Parsed: {stats['mqtt_parsed']} ({success_rate:.1f}% success)")
+        debug_log(f"   MQTT Errors: {stats['mqtt_errors']}")
+        debug_log(f"   Device Queued: {stats['device_queued']}")
+        debug_log(f"   Device Processed: {stats['device_processed']} ({stats['processing_rate']:.1f}/sec)")
+        debug_log(f"   Broadcast Sent: {stats['broadcast_sent']} ({stats['broadcast_rate']:.1f}/sec)")
+        debug_log(f"   Broadcast Errors: {stats['broadcast_errors']}")
+        debug_log(f"   DB Saved: {stats['db_saved']} ({stats['db_rate']:.1f}/sec)")
+        debug_log(f"   DB Errors: {stats['db_errors']}")
+        debug_log(f"   Elapsed Time: {stats['elapsed_time']:.1f} seconds")
 
 # Global monitoring instance
 message_counters = MessageCounters()
@@ -251,7 +252,7 @@ async def process_raw_messages():
             
             # Process batch if we have messages
             if batch:
-                print(f"Processing batch of {len(batch)} raw messages from thread-safe queue")
+                debug_log(f"Processing batch of {len(batch)} raw messages from thread-safe queue")
                 
                 # PROMETHEUS: Record batch processing
                 from app.metrics import record_batch_processing
@@ -289,7 +290,7 @@ async def process_raw_message_batch(raw_messages: list):
 
                 # PROMETHEUS: Record message type
                 if is_batched:
-                    print(f"Processing batched message with {len(data_points)} data points")
+                    debug_log(f"Processing batched message with {len(data_points)} data points")
                     record_message_type(is_batched=True, batch_size=len(data_points))
                 else:
                     record_message_type(is_batched=False)
@@ -358,8 +359,8 @@ async def process_raw_message_batch(raw_messages: list):
                         break
         
         total_points = sum(len(messages) for messages in device_messages.values())
-        print(f"JSON Parsing Stats: {parsed_count} parsed, {error_count} errors")
-        print(f"Processed {len(raw_messages)} raw messages into {total_points} data points for {len(device_messages)} devices")
+        debug_log(f"JSON Parsing Stats: {parsed_count} parsed, {error_count} errors")
+        debug_log(f"Processed {len(raw_messages)} raw messages into {total_points} data points for {len(device_messages)} devices")
         
     except Exception as e:
         print(f"Error processing raw message batch: {e}")

@@ -8,6 +8,7 @@ from typing import Dict, Set, List
 from fastapi import WebSocket
 from app.db import get_db, save_device_data_batch
 from app.models import IoTDevice
+from app.debug_log import debug_log
 from app.websocket_manager import websocket_connections  # Import from websocket_manager
 import app.shared_state as shared_state  # Import shared save state (save_flag, folder_id, curve_index)
 
@@ -66,13 +67,13 @@ def get_processing_stats():
 def print_processing_stats():
     """Print current processing statistics."""
     stats = processing_counters.get_stats()
-    print(f"\n[STATS] PROCESSING STATS:")
-    print(f"   Device Processed: {stats['device_processed']} ({stats['processing_rate']:.1f}/sec)")
-    print(f"   Broadcast Sent: {stats['broadcast_sent']} ({stats['broadcast_rate']:.1f}/sec)")
-    print(f"   Broadcast Errors: {stats['broadcast_errors']}")
-    print(f"   DB Saved: {stats['db_saved']} ({stats['db_rate']:.1f}/sec)")
-    print(f"   DB Errors: {stats['db_errors']}")
-    print(f"   Elapsed Time: {stats['elapsed_time']:.1f} seconds")
+    debug_log(f"\n[STATS] PROCESSING STATS:")
+    debug_log(f"   Device Processed: {stats['device_processed']} ({stats['processing_rate']:.1f}/sec)")
+    debug_log(f"   Broadcast Sent: {stats['broadcast_sent']} ({stats['broadcast_rate']:.1f}/sec)")
+    debug_log(f"   Broadcast Errors: {stats['broadcast_errors']}")
+    debug_log(f"   DB Saved: {stats['db_saved']} ({stats['db_rate']:.1f}/sec)")
+    debug_log(f"   DB Errors: {stats['db_errors']}")
+    debug_log(f"   Elapsed Time: {stats['elapsed_time']:.1f} seconds")
 
 async def process_message_batches(msg):
     """Handles incoming MQTT messages, processes them directly."""
@@ -297,7 +298,7 @@ async def process_batch(device_id: str, batch: list):
             # Bulk insert
             await save_device_data_batch(db, records)
 
-        print(f"Batch of {len(batch)} messages for device {device_id} saved successfully.")
+        debug_log(f"Batch of {len(batch)} messages for device {device_id} saved successfully.")
     except Exception as e:
         print(f"Error saving batch for device {device_id}: {e}")
         import traceback
@@ -350,13 +351,13 @@ async def _resolve_user_id_for_device(device_id: str) -> str:
                 # Cache as string because websocket_connections keys are strings
                 user_id_str = str(device.user_id)
                 device_user_map[device_id] = user_id_str
-                print(f"[RESOLVE] Device {device_id} belongs to user {user_id_str}")
+                debug_log(f"[RESOLVE] Device {device_id} belongs to user {user_id_str}")
                 return user_id_str
     except Exception as e:
         print(f"[RESOLVE] DB lookup failed for device {device_id}: {e}")
 
     # Default fallback — device unknown or DB unreachable
-    print(f"[RESOLVE] Device {device_id} not found in DB, defaulting to user '1'")
+    debug_log(f"[RESOLVE] Device {device_id} not found in DB, defaulting to user '1'")
     device_user_map[device_id] = "1"
     return "1"
 
@@ -387,19 +388,19 @@ async def broadcast_messages(device_id: str):
             # Re-resolve owner on each batch so routing picks up DB changes and new WebSocket sessions
             target_frontend = await _resolve_user_id_for_device(device_id)
             
-            print(f"[SEND] Sending batch of {len(batch)} messages from {device_id} to frontend-{target_frontend}")
+            debug_log(f"[SEND] Sending batch of {len(batch)} messages from {device_id} to frontend-{target_frontend}")
             total_messages_sent_to_frontend += len(batch)  # Update the accumulator
-            print(f"[STATS] Total messages sent to frontend: {total_messages_sent_to_frontend}")
+            debug_log(f"[STATS] Total messages sent to frontend: {total_messages_sent_to_frontend}")
             
             # Send only to the target frontend
             websockets = websocket_connections.get(target_frontend, set())
-            print(f"[CHECK] Checking websockets for frontend-{target_frontend}: {len(websockets)} connections")
+            debug_log(f"[CHECK] Checking websockets for frontend-{target_frontend}: {len(websockets)} connections")
             if websockets:
                 try:
                     await send_to_connected_clients_optimized(target_frontend, batch)
                     # MONITORING: Count successful broadcasts
                     processing_counters.broadcast_sent += len(batch)
-                    print(f"[OK] Successfully sent {len(batch)} messages to frontend-{target_frontend}")
+                    debug_log(f"[OK] Successfully sent {len(batch)} messages to frontend-{target_frontend}")
                 except Exception as e:
                     # MONITORING: Count broadcast errors
                     processing_counters.broadcast_errors += len(batch)
@@ -415,7 +416,7 @@ async def send_to_connected_clients_optimized(client_id: str, messages: list):
     """Send a batch of messages to all connected WebSocket clients with optimizations."""
     websockets = websocket_connections.get(client_id, set())
     if not websockets:
-        print(f"No active websocket connections found for user {client_id}")
+        debug_log(f"No active websocket connections found for user {client_id}")
         return
 
     try:
@@ -425,7 +426,7 @@ async def send_to_connected_clients_optimized(client_id: str, messages: list):
         # OPTIMIZED: Compress large payloads to reduce network overhead
         if len(message_data) > COMPRESSION_THRESHOLD:
             compressed_data = zlib.compress(message_data, level=COMPRESSION_LEVEL)
-            print(f"📦 Compressed payload: {len(message_data)} -> {len(compressed_data)} bytes ({len(compressed_data)/len(message_data)*100:.1f}% compression)")
+            debug_log(f"📦 Compressed payload: {len(message_data)} -> {len(compressed_data)} bytes ({len(compressed_data)/len(message_data)*100:.1f}% compression)")
             
             # Send compressed data as binary
             tasks = [ws.send_bytes(compressed_data) for ws in websockets]

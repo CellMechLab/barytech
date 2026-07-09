@@ -11,16 +11,55 @@ import html2canvas from "html2canvas";
 import { useTheme } from "@mui/material";
 import { tokens } from "../../theme";
 
-const FORCE_UNIT = process.env.REACT_APP_FORCE_UNIT || "N";
+// Display unit for force on live charts (μN = micro-Newtons).
+const FORCE_UNIT = process.env.REACT_APP_FORCE_UNIT || "μN";
+// Display unit for Z/displacement on live charts.
+const DISPLACEMENT_UNIT = process.env.REACT_APP_DISPLACEMENT_UNIT || "μm";
+// Scale factors from raw SI telemetry (m, N) to chart display units.
+const METERS_TO_MICROMETERS = 1e6;
+const NEWTONS_TO_MICRONEWTONS = 1e6;
 const FALLBACK_SAMPLE_INTERVAL_MS = Math.max(
   Number(process.env.REACT_APP_CHART_SAMPLE_INTERVAL_MS) || 1,
   Number.EPSILON
 );
+// Minimum ms between chart redraws (~4 fps default; 500 ms ≈ 2 fps).
+const CHART_REDRAW_INTERVAL_MS = Math.max(
+  Number(process.env.REACT_APP_CHART_REDRAW_INTERVAL_MS) || 250,
+  50
+);
+
+// Formats Y-axis and tooltip values with fixed decimals or scientific notation.
+const formatChartValue = (value) => {
+  const abs = Math.abs(value);
+  if (!Number.isFinite(value)) return "—";
+  if (abs === 0) return "0";
+  return abs >= 0.01 ? value.toFixed(3) : value.toExponential(2);
+};
 const LineChart = forwardRef(({ dataset = "force" }, ref) => {
   const theme = useTheme();
   const colors = tokens(theme.palette.mode);
   const chartRef = useRef(null);
   const { dataBuffer } = useContext(WebSocketContext);
+  // Holds latest props so resize redraws do not need to recreate the observer.
+  const dataBufferRef = useRef(dataBuffer);
+  const datasetRef = useRef(dataset);
+  const colorsRef = useRef(colors);
+  // Tracks last rendered size to skip redundant resize redraws.
+  const lastDrawnSizeRef = useRef({ width: 0, height: 0 });
+  // Pending animation frame id for debounced resize handling.
+  const resizeFrameRef = useRef(null);
+  // Timestamp of the last completed data-driven chart redraw.
+  const lastChartRedrawMsRef = useRef(0);
+  // Pending rAF id for a throttled data-buffer redraw.
+  const pendingDataRedrawFrameRef = useRef(null);
+  // Pending timeout that fires when the throttle window has elapsed.
+  const pendingDataRedrawTimeoutRef = useRef(null);
+  // Unique SVG clip-path id so multiple charts on the dashboard do not clash.
+  const clipIdRef = useRef(`clip-${Math.random().toString(36).slice(2, 9)}`);
+
+  dataBufferRef.current = dataBuffer;
+  datasetRef.current = dataset;
+  colorsRef.current = colors;
 
   const parseTimestampMs = (timestamp, index) => {
     const numericTimestamp =
@@ -152,7 +191,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
           date: new Date(Math.floor(xValue)),
           xValue,
           timestamp,
-          value: force,
+          value: force * NEWTONS_TO_MICRONEWTONS,
           isStable:
             !shouldDeferLatestGroup ||
             points[index].rawXValue !== latestPoint.rawXValue,
@@ -172,12 +211,14 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
       return;
     }
 
-    const csvContent = [["Timestamp", "Displacement", `Force (${FORCE_UNIT})`]];
+    const csvContent = [["Timestamp", `Z (${DISPLACEMENT_UNIT})`, `Force (${FORCE_UNIT})`]];
     dataBuffer.forEach((item) => {
+      const displacement = item.displacement == null ? "" : Number(item.displacement);
+      const force = item.force == null ? "" : Number(item.force);
       csvContent.push([
         item.timestamp_ms ?? item.timestamp ?? "",
-        item.displacement ?? "",
-        item.force ?? "",
+        Number.isFinite(displacement) ? displacement * METERS_TO_MICROMETERS : "",
+        Number.isFinite(force) ? force * NEWTONS_TO_MICRONEWTONS : "",
       ]);
     });
 
@@ -209,26 +250,43 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
     transformData,
   }));
 
+  // Stable draw function reference for the resize observer effect.
+  const drawChartRef = useRef(() => {});
+
   useEffect(() => {
     const container = chartRef.current;
+    if (!container) return undefined;
+
     const drawChart = () => {
       const containerWidth = container.offsetWidth;
       const containerHeight = container.offsetHeight;
+      if (containerWidth <= 0 || containerHeight <= 0) return;
 
-      const margin = { top: 20, right: 30, bottom: 40, left: 60 };
-      const chartWidth = containerWidth - margin.left - margin.right;
-      const chartHeight = containerHeight - margin.top - margin.bottom - 50;
+      lastDrawnSizeRef.current = { width: containerWidth, height: containerHeight };
+
+      const activeDataset = datasetRef.current;
+      const activeColors = colorsRef.current;
+      const activeDataBuffer = dataBufferRef.current;
+      const clipId = clipIdRef.current;
+
+      // Extra left margin so the rotated Y-axis unit label is not clipped.
+      const margin = { top: 20, right: 30, bottom: 40, left: 78 };
+      const chartWidth = Math.max(containerWidth - margin.left - margin.right, 0);
+      const chartHeight = Math.max(containerHeight - margin.top - margin.bottom - 50, 0);
+      // Axis text color — grey[100] stays readable on the dark dashboard cards.
+      const axisTextColor = activeColors.grey?.[100] || "#e0e0e0";
+      const axisLineColor = activeColors.grey?.[400] || "#858585";
       d3.select(chartRef.current).selectAll("*").remove();
 
-      const data = transformData(dataBuffer);
+      const data = transformData(activeDataBuffer);
       const { series1, series2 } = data;
-      const fullSeries = dataset === "force" ? series2 : series1;
+      const fullSeries = activeDataset === "force" ? series2 : series1;
       const series = fullSeries.filter((point) => point.isStable);
 
       const navHeight = 50;
 
       const defaultXDomain = [Date.now(), Date.now() + 60 * 60 * 1000];
-      const defaultYDomain = dataset === "force" ? [-1e-6, 1e-6] : [-1e-12, 1e-12];
+      const defaultYDomain = activeDataset === "force" ? [-1, 1] : [-2, 0];
 
       const xDomain = series.length
         ? d3.extent(series, (d) => d.xValue)
@@ -237,7 +295,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
       const yDomain = series.length
         ? d3.extent(series, (d) => d.value)
         : defaultYDomain;
-      const yPadding = (yDomain[1] - yDomain[0]) * 0.2 || (dataset === "force" ? 1e-7 : 1e-13);
+      const yPadding = (yDomain[1] - yDomain[0]) * 0.2 || 0.1;
       const yDomainPadded = [yDomain[0] - yPadding, yDomain[1] + yPadding];
 
       const x = d3.scaleLinear().domain(xDomain).range([0, chartWidth]).nice();
@@ -250,12 +308,13 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         .select(chartRef.current)
         .append("svg")
         .attr("width", containerWidth)
-        .attr("height", chartHeight + margin.top + margin.bottom + navHeight);
+        .attr("height", containerHeight)
+        .attr("style", "display: block; overflow: visible;");
 
       svg
         .append("defs")
         .append("clipPath")
-        .attr("id", "clip")
+        .attr("id", clipId)
         .append("rect")
         .attr("width", chartWidth + 5)
         .attr("height", chartHeight);
@@ -277,7 +336,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         .attr("stroke", "#ddd")
         .attr("stroke-dasharray", "2,2");
 
-      const linesGroup = chartGroup.append("g").attr("clip-path", "url(#clip)");
+      const linesGroup = chartGroup.append("g").attr("clip-path", `url(#${clipId})`);
 
       const navGroup = svg
         .append("g")
@@ -294,29 +353,30 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
       linesGroup
         .append("path")
         .datum(series)
-        .attr("class", `line line-${dataset}`)
+        .attr("class", `line line-${activeDataset}`)
         .attr("d", line)
-        .attr("stroke", dataset === "force" ? "#FF9800" : "#009688")
+        .attr("stroke", activeDataset === "force" ? "#FF9800" : "#009688")
         .attr("fill", "none");
 
       const tooltip = d3
         .select(chartRef.current)
         .append("div")
-        .attr("class", `tooltip tooltip-${dataset}`)
+        .attr("class", `tooltip tooltip-${activeDataset}`)
         .style("position", "absolute")
         .style("display", "none")
         .style("padding", "6px")
-        .style("background-color", colors.grey?.[100] || "white")
-        .style("border", `1px solid ${colors.grey?.[500] || "#ccc"}`)
+        .style("background-color", activeColors.grey?.[100] || "white")
+        .style("border", `1px solid ${activeColors.grey?.[500] || "#ccc"}`)
         .style("border-radius", "4px")
         .style("font-size", "12px")
-        .style("color", colors.grey?.[900] || "#333")
+        .style("color", activeColors.grey?.[900] || "#333")
         .style("pointer-events", "none");
 
       function showTooltip(event, d, label) {
+        const unit = label === "Force" ? FORCE_UNIT : DISPLACEMENT_UNIT;
         tooltip
           .html(
-            `${label}<br>Time: ${d.timestamp || formatTimestamp(d.xValue)}<br>Value: ${d.value.toExponential(2)} ${label === "Force" ? FORCE_UNIT : "m"}`
+            `${label}<br>Time: ${d.timestamp || formatTimestamp(d.xValue)}<br>Value: ${formatChartValue(d.value)} ${unit}`
           )
           .style("display", "block");
       }
@@ -335,19 +395,19 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
       const showPointMarkers = series.length <= 1000;
       const circles = showPointMarkers
         ? linesGroup
-            .selectAll(`.point-${dataset}`)
+            .selectAll(`.point-${activeDataset}`)
             .data(series)
             .enter()
             .append("circle")
-            .attr("class", `point-${dataset}`)
+            .attr("class", `point-${activeDataset}`)
             .attr("cx", (d) => x(d.xValue))
             .attr("cy", (d) => y(d.value))
             .attr("r", 4)
-            .attr("fill", dataset === "force" ? "#FF9800" : "#009688")
-            .on("mouseover", (event, d) => showTooltip(event, d, dataset === "force" ? "Force" : "Displacement"))
+            .attr("fill", activeDataset === "force" ? "#FF9800" : "#009688")
+            .on("mouseover", (event, d) => showTooltip(event, d, activeDataset === "force" ? "Force" : "Z"))
             .on("mousemove", moveTooltip)
             .on("mouseout", hideTooltip)
-        : linesGroup.selectAll(`.point-${dataset}`);
+        : linesGroup.selectAll(`.point-${activeDataset}`);
 
       const xAxisGroup = chartGroup
         .append("g")
@@ -355,11 +415,15 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         .attr("transform", `translate(0,${chartHeight})`)
         .call(d3.axisBottom(x).ticks(10).tickFormat(formatTimestamp));
 
+      xAxisGroup.selectAll(".tick text").attr("fill", axisTextColor);
+      xAxisGroup.selectAll(".tick line, .domain").attr("stroke", axisLineColor);
+
       xAxisGroup
         .append("text")
+        .attr("class", "x-axis-label")
         .attr("x", chartWidth / 2)
         .attr("y", 35)
-        .attr("fill", colors.grey?.[900] || "#333")
+        .attr("fill", axisTextColor)
         .attr("text-anchor", "middle")
         .text("Time");
 
@@ -370,17 +434,21 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
           d3
             .axisLeft(y)
             .ticks(10)
-            .tickFormat((d) => d.toExponential(2))
+            .tickFormat((d) => formatChartValue(d))
         );
+
+      yAxisGroup.selectAll(".tick text").attr("fill", axisTextColor);
+      yAxisGroup.selectAll(".tick line, .domain").attr("stroke", axisLineColor);
 
       yAxisGroup
         .append("text")
-        .attr("x", -chartHeight / 2)
-        .attr("y", -40)
-        .attr("fill", colors.grey?.[900] || "#333")
-        .attr("text-anchor", "middle")
+        .attr("class", "y-axis-label")
         .attr("transform", "rotate(-90)")
-        .text(dataset === "force" ? `Force (${FORCE_UNIT})` : "Displacement (m)");
+        .attr("y", 0 - margin.left + 18)
+        .attr("x", 0 - chartHeight / 2)
+        .attr("fill", axisTextColor)
+        .attr("text-anchor", "middle")
+        .text(activeDataset === "force" ? `Force (${FORCE_UNIT})` : `Z (${DISPLACEMENT_UNIT})`);
 
       const navLine = d3
         .line()
@@ -392,7 +460,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         .datum(series)
         .attr("class", "line")
         .attr("d", navLine)
-        .attr("stroke", dataset === "force" ? "#FF9800" : "#009688")
+        .attr("stroke", activeDataset === "force" ? "#FF9800" : "#009688")
         .attr("fill", "none");
 
       let brushGroup;
@@ -415,7 +483,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         if (!isBrushInitialized) return;
         if (selection) {
           const handleSize = 15;
-          const handleColor = colors.grey?.[700] || "#546E7A";
+          const handleColor = activeColors.grey?.[700] || "#546E7A";
 
           const handles = brushGroup
             .selectAll(".handle")
@@ -428,7 +496,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
             .attr("width", handleSize)
             .attr("height", navHeight)
             .style("fill", handleColor)
-            .style("stroke", colors.grey?.[900] || "black")
+            .style("stroke", activeColors.grey?.[900] || "black")
             .style("stroke-width", 1)
             .attr("rx", 4)
             .attr("ry", 4)
@@ -436,12 +504,12 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
             .attr("x", (d, i) => selection[i] - handleSize / 2)
             .attr("y", 0)
             .style("fill", handleColor)
-            .style("stroke", colors.grey?.[900] || "black")
+            .style("stroke", activeColors.grey?.[900] || "black")
             .style("stroke-width", 1)
             .attr("rx", 4)
             .attr("ry", 4)
             .on("mouseover", function () {
-              d3.select(this).style("fill", colors.grey?.[500] || "#78909C");
+              d3.select(this).style("fill", activeColors.grey?.[500] || "#78909C");
             })
             .on("mouseout", function () {
               d3.select(this).style("fill", handleColor);
@@ -467,19 +535,23 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
             ]).nice();
           }
 
-          linesGroup.select(`.line-${dataset}`).attr("d", line);
+          linesGroup.select(`.line-${activeDataset}`).attr("d", line);
 
           circles
             .attr("cx", (d) => x(d.xValue))
             .attr("cy", (d) => y(d.value));
 
           xAxisGroup.call(d3.axisBottom(x).ticks(10).tickFormat(formatTimestamp));
+          xAxisGroup.selectAll(".tick text").attr("fill", axisTextColor);
+          xAxisGroup.selectAll(".tick line, .domain").attr("stroke", axisLineColor);
           yAxisGroup.call(
             d3
               .axisLeft(y)
               .ticks(10)
-              .tickFormat((d) => d.toExponential(2))
+              .tickFormat((d) => formatChartValue(d))
           );
+          yAxisGroup.selectAll(".tick text").attr("fill", axisTextColor);
+          yAxisGroup.selectAll(".tick line, .domain").attr("stroke", axisLineColor);
 
           updateHandles(selection);
         }
@@ -489,15 +561,104 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
       updateHandles(x.range());
     };
 
+    drawChartRef.current = drawChart;
     drawChart();
-    const resizeObserver = new ResizeObserver(() => {
-      drawChart();
-    });
-    resizeObserver.observe(container);
-    return () => resizeObserver.disconnect();
-  }, [dataBuffer, dataset]);
+  }, [dataset, theme.palette.mode]);
 
-  return <div ref={chartRef} style={{ position: "relative", height: "400px" }} />;
+  useEffect(() => {
+    // Schedules a redraw at most every CHART_REDRAW_INTERVAL_MS using rAF + skip.
+    const scheduleThrottledDataRedraw = () => {
+      const runRedraw = () => {
+        pendingDataRedrawFrameRef.current = null;
+        lastChartRedrawMsRef.current = performance.now();
+        drawChartRef.current();
+      };
+
+      const now = performance.now();
+      const elapsed = now - lastChartRedrawMsRef.current;
+
+      if (elapsed >= CHART_REDRAW_INTERVAL_MS) {
+        if (pendingDataRedrawTimeoutRef.current !== null) {
+          window.clearTimeout(pendingDataRedrawTimeoutRef.current);
+          pendingDataRedrawTimeoutRef.current = null;
+        }
+        if (pendingDataRedrawFrameRef.current !== null) {
+          cancelAnimationFrame(pendingDataRedrawFrameRef.current);
+        }
+        pendingDataRedrawFrameRef.current = requestAnimationFrame(runRedraw);
+        return;
+      }
+
+      if (
+        pendingDataRedrawTimeoutRef.current !== null ||
+        pendingDataRedrawFrameRef.current !== null
+      ) {
+        return;
+      }
+
+      pendingDataRedrawTimeoutRef.current = window.setTimeout(() => {
+        pendingDataRedrawTimeoutRef.current = null;
+        pendingDataRedrawFrameRef.current = requestAnimationFrame(runRedraw);
+      }, CHART_REDRAW_INTERVAL_MS - elapsed);
+    };
+
+    scheduleThrottledDataRedraw();
+
+    return () => {
+      if (pendingDataRedrawTimeoutRef.current !== null) {
+        window.clearTimeout(pendingDataRedrawTimeoutRef.current);
+        pendingDataRedrawTimeoutRef.current = null;
+      }
+      if (pendingDataRedrawFrameRef.current !== null) {
+        cancelAnimationFrame(pendingDataRedrawFrameRef.current);
+        pendingDataRedrawFrameRef.current = null;
+      }
+    };
+  }, [dataBuffer]);
+
+  useEffect(() => {
+    const container = chartRef.current;
+    if (!container) return undefined;
+
+    // Debounce resize redraws to avoid ResizeObserver feedback loops in CRA overlay.
+    const scheduleResizeDraw = () => {
+      if (resizeFrameRef.current !== null) {
+        cancelAnimationFrame(resizeFrameRef.current);
+      }
+      resizeFrameRef.current = requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        const width = container.offsetWidth;
+        const height = container.offsetHeight;
+        const last = lastDrawnSizeRef.current;
+        if (width === last.width && height === last.height) return;
+        drawChartRef.current();
+      });
+    };
+
+    const resizeObserver = new ResizeObserver(scheduleResizeDraw);
+    resizeObserver.observe(container);
+
+    return () => {
+      resizeObserver.disconnect();
+      if (resizeFrameRef.current !== null) {
+        cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = null;
+      }
+    };
+  }, []);
+
+  return (
+    <div
+      ref={chartRef}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "100%",
+        minHeight: "120px",
+        overflow: "hidden",
+      }}
+    />
+  );
 });
 
 export default LineChart;
