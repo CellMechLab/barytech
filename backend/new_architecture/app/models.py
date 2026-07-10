@@ -28,6 +28,8 @@ class Folder(Base):
     tip_geometry = Column(String, nullable=True)
     tip_radius = Column(Float, nullable=True)
     sampling_rate = Column(Float, nullable=True)
+    # Force sensor model used for this experiment, e.g. Aurora, CSense.
+    sensor_type = Column(String, nullable=True)
 
     # ORM back-reference to the owning User row.
     user = relationship("User", back_populates="folders")
@@ -41,8 +43,8 @@ class DeviceData(Base):
     id = Column(Integer, primary_key=True, index=True)
     device_id = Column(String, ForeignKey("iot_devices.id"), nullable=False, index=True)  # Foreign key to IoTDevice
     timestamp = Column(DateTime, default=datetime.utcnow)  # Time the data was recorded
-    displacement = Column(Float, nullable=False)  # Displacement data
-    force = Column(Float, nullable=False)  # Force data
+    displacement = Column(Float, nullable=False)  # Displacement in micrometers (µm)
+    force = Column(Float, nullable=False)  # Force in micronewtons (µN)
     # Foreign key to the folder this row belongs to; nullable for un-grouped rows.
     folder_id = Column(Integer, ForeignKey("folders.id"), nullable=True, index=True)
     # Zero-based index of the save-cycle (ON→OFF) within the folder this row was recorded during.

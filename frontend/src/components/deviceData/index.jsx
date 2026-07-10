@@ -25,6 +25,7 @@ import axios from "axios";
 import { toast, Toaster } from "sonner";
 import { useNavigate } from "react-router-dom";
 import { buildBackendUrl } from "../../config/endpoints";
+import { formatDisplacementMicrometers, formatForceMicronewtons } from "../../config/units";
 import ExportFolderModal from "../ExportFolderModal";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -553,28 +554,28 @@ const DeviceDataTable = () => {
     },
     {
       field: "displacement",
-      headerName: "Displacement",
+      headerName: "Displacement (µm)",
       flex: 0.8,
       sortable: false,
       renderCell: (params) => {
         if (!params.row.isData) return null;
         return (
           <Typography fontSize="12px" sx={{ color: colors.grey[100] }}>
-            {params.value} mm
+            {formatDisplacementMicrometers(params.value)}
           </Typography>
         );
       },
     },
     {
       field: "force",
-      headerName: "Force",
+      headerName: "Force (µN)",
       flex: 0.8,
       sortable: false,
       renderCell: (params) => {
         if (!params.row.isData) return null;
         return (
           <Typography fontSize="12px" sx={{ color: colors.grey[100] }}>
-            {params.value} N
+            {formatForceMicronewtons(params.value)}
           </Typography>
         );
       },

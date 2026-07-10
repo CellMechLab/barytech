@@ -384,7 +384,7 @@ const Dashboard = () => {
         <Box width="100%" height="100%" display="flex" flexDirection="column" sx={{ minHeight: 0, overflow: "hidden" }}>
           <Box mt={chartHeaderMt} px={chartHeaderPx} display="flex" justifyContent="space-between" alignItems="center" sx={{ flexShrink: 0 }}>
             <Typography fontWeight="bold" sx={{ color: colors.grey[100], fontSize: "clamp(11px, 1.1vw, 20px)" }}>
-              Z vs Time
+              Z vs Time (µm)
             </Typography>
             <IconButton onClick={handleDownload}>
               <DownloadOutlinedIcon sx={{ fontSize: "clamp(14px, 1.4vw, 26px)", color: colors.greenAccent[500] }} />

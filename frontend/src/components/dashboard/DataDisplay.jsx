@@ -3,8 +3,7 @@ import { Box, Typography } from '@mui/material';
 import { useTheme } from '@mui/material';
 import { tokens } from '../../theme';
 import { WebSocketContext } from './WebSocketProvider';
-
-const FORCE_UNIT = process.env.REACT_APP_FORCE_UNIT || "N";
+import { formatDisplacementMicrometers, formatForceMicronewtons } from '../../config/units';
 
 const DataDisplay = () => {
   const theme = useTheme();
@@ -24,10 +23,10 @@ const DataDisplay = () => {
         >
           <Box>
             <Typography color={colors.greenAccent[500]} variant="h5" fontWeight="600">
-              Data 1: {data.displacement}
+              Z: {formatDisplacementMicrometers(data.displacement)}
             </Typography>
             <Typography color={colors.grey[100]}>
-              Data 2: {data.force} {FORCE_UNIT}
+              Force: {formatForceMicronewtons(data.force)}
             </Typography>
           </Box>
           <Box color={colors.grey[100]}>{new Date().toLocaleDateString()}</Box>

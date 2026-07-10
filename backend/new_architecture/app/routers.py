@@ -364,6 +364,7 @@ async def list_folders(
                     tip_geometry=folder.tip_geometry,
                     tip_radius=folder.tip_radius,
                     sampling_rate=folder.sampling_rate,
+                    sensor_type=folder.sensor_type,
                 )
             )
         return folders

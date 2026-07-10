@@ -58,6 +58,33 @@ def to_motor_flag_or_default(value):
         return parsed
     return 0
 
+# Keys that carry force already in Newtons rather than millinewtons.
+FORCE_NEWTON_KEYS = {"force_N", "Force_N", "force_n"}
+
+def first_defined_key_and_value(source, keys):
+    """Return the first matching key and value pair from a telemetry dict."""
+    for key in keys:
+        value = source.get(key)
+        if value is not None:
+            return key, value
+    return None, None
+
+def to_displacement_micrometers(value):
+    """Convert MQTT displacement from millimeters to micrometers."""
+    parsed = to_float_or_none(value)
+    if parsed is None:
+        return None
+    return parsed * 1000.0
+
+def to_force_micronewtons(value, force_key=None):
+    """Convert MQTT force to micronewtons (mN×1000, or N×1e6 for Newton keys)."""
+    parsed = to_float_or_none(value)
+    if parsed is None:
+        return None
+    if force_key in FORCE_NEWTON_KEYS:
+        return parsed * 1_000_000.0
+    return parsed * 1000.0
+
 def normalize_data_point(data_point):
     """Return a canonical telemetry payload, or None for non-telemetry messages."""
     if not isinstance(data_point, dict):
@@ -70,20 +97,17 @@ def normalize_data_point(data_point):
         first_defined_value(data_point, ["device_id", "deviceId", "device", "id"])
         or first_defined_value(state, ["device_id", "deviceId", "device", "id"])
     )
-    displacement = to_float_or_none(
-        first_defined_value(data_point, ["displacement", "displacement_mm", "z", "Z", "z_mm", "Z_mm"])
-        if first_defined_value(data_point, ["displacement", "displacement_mm", "z", "Z", "z_mm", "Z_mm"]) is not None
-        else (
-            first_defined_value(state, ["displacement", "displacement_mm", "z", "Z", "z_mm", "Z_mm"])
-            if first_defined_value(state, ["displacement", "displacement_mm", "z", "Z", "z_mm", "Z_mm"]) is not None
-            else first_defined_value(position, ["z", "Z"])
-        )
-    )
-    force = to_float_or_none(
-        first_defined_value(data_point, ["force", "Force", "force_mN", "force_N", "force_n", "Force_mN", "Force_N"])
-        if first_defined_value(data_point, ["force", "Force", "force_mN", "force_N", "force_n", "Force_mN", "Force_N"]) is not None
-        else first_defined_value(state, ["force", "Force", "force_mN", "force_N", "force_n", "Force_mN", "Force_N"])
-    )
+    displacement_keys = ["displacement", "displacement_mm", "z", "Z", "z_mm", "Z_mm"]
+    displacement_key, displacement = first_defined_key_and_value(data_point, displacement_keys)
+    if displacement is None:
+        displacement_key, displacement = first_defined_key_and_value(state, displacement_keys)
+    if displacement is None:
+        displacement_key, displacement = first_defined_key_and_value(position, ["z", "Z"])
+
+    force_keys = ["force", "Force", "force_mN", "force_N", "force_n", "Force_mN", "Force_N"]
+    force_key, force = first_defined_key_and_value(data_point, force_keys)
+    if force is None:
+        force_key, force = first_defined_key_and_value(state, force_keys)
     # Phase: 0 = indenting (segment0), 1 = retracting (segment1).
     phase_raw = first_defined_value(
         data_point,
@@ -104,11 +128,19 @@ def normalize_data_point(data_point):
     if displacement is None and force is None:
         return None
 
+    # Default missing channel to zero so partial MQTT payloads still persist.
+    displacement_um = to_displacement_micrometers(displacement)
+    if displacement_um is None:
+        displacement_um = 0.0
+    force_uN = to_force_micronewtons(force, force_key)
+    if force_uN is None:
+        force_uN = 0.0
+
     normalized = dict(data_point)
     normalized["device_id"] = str(device_id or DEFAULT_FRONTEND_DEVICE_ID)
     normalized["timestamp"] = first_defined_value(data_point, ["timestamp", "time", "t"]) or first_defined_value(state, ["timestamp", "time", "t"]) or datetime_utc_iso()
-    normalized["displacement"] = displacement
-    normalized["force"] = force
+    normalized["displacement"] = displacement_um
+    normalized["force"] = force_uN
     normalized["phase"] = phase
     normalized["motor_working"] = motor_working
     return normalized

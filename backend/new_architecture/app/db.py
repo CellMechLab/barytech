@@ -187,6 +187,7 @@ EXPERIMENT_METADATA_DEFAULTS = {
     "tip_geometry": "sphere",
     "tip_radius": 1e-5,
     "sampling_rate": 1e5,
+    "sensor_type": "aurora",
 }
 
 
@@ -286,6 +287,7 @@ async def upsert_folder_metadata(
         "tip_geometry": "tip_geometry",
         "tip_radius": "tip_radius",
         "sampling_rate": "sampling_rate",
+        "sensor_type": "sensor_type",
     }
     updates = {}
     for source_key, column_name in field_map.items():
@@ -334,6 +336,7 @@ def get_folder_export_metadata(folder: Folder) -> dict:
         "tip_geometry": str(_resolve_folder_metadata_value(folder, "tip_geometry")),
         "tip_radius": float(_resolve_folder_metadata_value(folder, "tip_radius")),
         "sampling_rate": float(_resolve_folder_metadata_value(folder, "sampling_rate")),
+        "sensor_type": str(_resolve_folder_metadata_value(folder, "sensor_type")),
     }
 
 
@@ -356,6 +359,7 @@ def _write_tip_metadata_group(tip_group, folder: Folder):
     tip_group.attrs["parameter"] = "Radius"
     tip_group.attrs["unit"] = "um"
     tip_group.attrs["value"] = float(_resolve_folder_metadata_value(folder, "tip_radius"))
+    tip_group.attrs["sensor_type"] = str(_resolve_folder_metadata_value(folder, "sensor_type"))
 
 
 async def export_folder_to_hdf5(file_path: str, folder_id: int, user_id: int) -> str:

@@ -35,8 +35,8 @@ class DeviceDataResponse(BaseModel):
     id: int = Field(..., description="Unique identifier for the device data entry")
     device_id: str = Field(..., description="ID of the device associated with this data")
     timestamp: datetime = Field(..., description="Time the data was recorded")
-    displacement: float = Field(..., description="Displacement value recorded by the device")
-    force: float = Field(..., description="Force value recorded by the device")
+    displacement: float = Field(..., description="Displacement in micrometers (µm)")
+    force: float = Field(..., description="Force in micronewtons (µN)")
     # Indentation phase: 0 = indent, 1 = retract.
     phase: int = 0
     # Motor activity flag: 0 = idle, 1 = moving.
@@ -81,6 +81,7 @@ class FolderResponse(BaseModel):
     tip_geometry: Optional[str] = None
     tip_radius: Optional[float] = None
     sampling_rate: Optional[float] = None
+    sensor_type: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -95,6 +96,7 @@ class FolderMetadataUpdate(BaseModel):
     tip_geometry: Optional[str] = None
     tip_radius: Optional[float] = None
     sampling_rate: Optional[float] = None
+    sensor_type: Optional[str] = None
 
 
 class FolderExportMetadataResponse(BaseModel):
@@ -108,6 +110,7 @@ class FolderExportMetadataResponse(BaseModel):
     tip_geometry: str
     tip_radius: float
     sampling_rate: float
+    sensor_type: str
 
 
 class CurveInfo(BaseModel):
@@ -128,9 +131,9 @@ class DeviceDataRowResponse(BaseModel):
     device_id: str
     # UTC timestamp when the reading was recorded.
     timestamp: datetime
-    # Displacement reading in mm.
+    # Displacement stored in micrometers (µm).
     displacement: float
-    # Force reading in N.
+    # Force stored in micronewtons (µN).
     force: float
     # Folder this row was saved into; None for rows saved before folders existed.
     folder_id: Optional[int] = None

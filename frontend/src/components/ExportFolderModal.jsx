@@ -8,21 +8,46 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControl,
   Grid,
+  InputLabel,
+  MenuItem,
+  Select,
   TextField,
   Typography,
 } from "@mui/material";
 import { toast } from "sonner";
 import { buildBackendUrl } from "../config/endpoints";
 
-// Metadata fields written into every curve's HDF5 tip group on export.
+// Allowed probe tip shapes for HDF5 tip geometry export.
+const TIP_GEOMETRY_OPTIONS = ["sphere", "cone", "cylinder", "pyramid"];
+
+// Scale factors: display value = stored SI value × storageScale.
+const METERS_TO_MICROMETERS = 1e6;
+const METERS_TO_MILLIMETERS = 1e3;
+
+// Metadata fields shown in the export modal (Z conversion uses backend default only).
 const EXPORT_METADATA_FIELDS = [
-  { key: "velocity", label: "Velocity (m/s)", inputType: "number" },
-  { key: "force_conversion_factor", label: "Force conversion factor", inputType: "number" },
-  { key: "z_conversion_factor", label: "Z conversion factor", inputType: "number" },
+  {
+    key: "velocity",
+    label: "Velocity (µm/s)",
+    inputType: "number",
+    storageScale: METERS_TO_MICROMETERS,
+  },
+  {
+    key: "force_conversion_factor",
+    label: "Force conversion coefficient (N/mm)",
+    inputType: "number",
+  },
   { key: "spring_constant", label: "Spring constant (N/m)", inputType: "number" },
-  { key: "tip_geometry", label: "Tip geometry", inputType: "text" },
-  { key: "tip_radius", label: "Tip radius (m)", inputType: "number" },
+  { key: "sensor_type", label: "Sensor type", inputType: "text" },
+  { key: "tip_geometry", label: "Probe tip shape", inputType: "select" },
+  {
+    key: "tip_radius",
+    label: "Tip radius (mm)",
+    inputType: "number",
+    storageScale: METERS_TO_MILLIMETERS,
+  },
 ];
 
 // Reads the JWT stored at login for authenticated backend requests.
@@ -73,13 +98,16 @@ const ExportFolderModal = ({
           throw new Error(detail);
         }
         const metadata = await res.json();
+        const loadedTipGeometry = String(metadata.tip_geometry ?? "sphere").toLowerCase();
         setMetadataForm({
-          velocity: metadata.velocity,
+          velocity: metadata.velocity * METERS_TO_MICROMETERS,
           force_conversion_factor: metadata.force_conversion_factor,
-          z_conversion_factor: metadata.z_conversion_factor,
           spring_constant: metadata.spring_constant,
-          tip_geometry: metadata.tip_geometry,
-          tip_radius: metadata.tip_radius,
+          sensor_type: metadata.sensor_type,
+          tip_geometry: TIP_GEOMETRY_OPTIONS.includes(loadedTipGeometry)
+            ? loadedTipGeometry
+            : "sphere",
+          tip_radius: metadata.tip_radius * METERS_TO_MILLIMETERS,
         });
       } catch (err) {
         console.error("[ExportFolderModal] metadata load failed:", err);
@@ -98,10 +126,14 @@ const ExportFolderModal = ({
 
   const buildMetadataPayload = () => {
     const payload = {};
-    EXPORT_METADATA_FIELDS.forEach(({ key, inputType }) => {
+    EXPORT_METADATA_FIELDS.forEach(({ key, inputType, storageScale }) => {
       const raw = metadataForm[key];
       if (raw === "" || raw == null) return;
-      payload[key] = inputType === "number" ? Number(raw) : raw;
+      let value = inputType === "number" ? Number(raw) : raw;
+      if (storageScale) {
+        value = value / storageScale;
+      }
+      payload[key] = value;
     });
     return payload;
   };
@@ -188,6 +220,11 @@ const ExportFolderModal = ({
     "&:hover .MuiOutlinedInput-notchedOutline": { borderColor: colors.greenAccent[500] },
   };
 
+  const selectFieldSx = {
+    ...textFieldSx,
+    "& .MuiSvgIcon-root": { color: colors.grey[300] },
+  };
+
   return (
     <Dialog
       open={open}
@@ -214,18 +251,47 @@ const ExportFolderModal = ({
           <Grid container spacing={2}>
             {EXPORT_METADATA_FIELDS.map(({ key, label, inputType }) => (
               <Grid item xs={12} sm={6} key={key}>
-                <TextField
-                  fullWidth
-                  size="small"
-                  label={label}
-                  type={inputType}
-                  value={metadataForm[key] ?? ""}
-                  onChange={(e) =>
-                    setMetadataForm((prev) => ({ ...prev, [key]: e.target.value }))
-                  }
-                  disabled={exporting}
-                  sx={textFieldSx}
-                />
+                {inputType === "select" ? (
+                  <FormControl fullWidth size="small" disabled={exporting} sx={selectFieldSx}>
+                    <InputLabel id={`${key}-label`}>{label}</InputLabel>
+                    <Select
+                      labelId={`${key}-label`}
+                      label={label}
+                      value={metadataForm[key] ?? "sphere"}
+                      onChange={(e) =>
+                        setMetadataForm((prev) => ({ ...prev, [key]: e.target.value }))
+                      }
+                      MenuProps={{
+                        PaperProps: {
+                          sx: { backgroundColor: colors.primary[400] },
+                        },
+                      }}
+                    >
+                      {TIP_GEOMETRY_OPTIONS.map((option) => (
+                        <MenuItem
+                          key={option}
+                          value={option}
+                          sx={{ fontSize: "13px", color: colors.grey[100], textTransform: "capitalize" }}
+                        >
+                          {option}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                ) : (
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label={label}
+                    type={inputType}
+                    value={metadataForm[key] ?? ""}
+                    onChange={(e) =>
+                      setMetadataForm((prev) => ({ ...prev, [key]: e.target.value }))
+                    }
+                    disabled={exporting}
+                    sx={textFieldSx}
+                  />
+                )}
               </Grid>
             ))}
           </Grid>

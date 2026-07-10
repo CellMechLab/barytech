@@ -10,14 +10,14 @@ import { WebSocketContext } from "./WebSocketProvider";
 import html2canvas from "html2canvas";
 import { useTheme } from "@mui/material";
 import { tokens } from "../../theme";
+import {
+  DISPLACEMENT_UNIT,
+  FORCE_UNIT,
+  formatDisplacementMicrometers,
+} from "../../config/units";
 
-// Display unit for force on live charts (μN = micro-Newtons).
-const FORCE_UNIT = process.env.REACT_APP_FORCE_UNIT || "μN";
-// Display unit for Z/displacement on live charts.
-const DISPLACEMENT_UNIT = process.env.REACT_APP_DISPLACEMENT_UNIT || "μm";
-// Scale factors from raw SI telemetry (m, N) to chart display units.
-const METERS_TO_MICROMETERS = 1e6;
-const NEWTONS_TO_MICRONEWTONS = 1e6;
+// Display units match values stored after MQTT normalization (µm, µN).
+const FORCE_UNIT_LABEL = FORCE_UNIT;
 const FALLBACK_SAMPLE_INTERVAL_MS = Math.max(
   Number(process.env.REACT_APP_CHART_SAMPLE_INTERVAL_MS) || 1,
   Number.EPSILON
@@ -191,7 +191,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
           date: new Date(Math.floor(xValue)),
           xValue,
           timestamp,
-          value: force * NEWTONS_TO_MICRONEWTONS,
+          value: force,
           isStable:
             !shouldDeferLatestGroup ||
             points[index].rawXValue !== latestPoint.rawXValue,
@@ -211,14 +211,14 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
       return;
     }
 
-    const csvContent = [["Timestamp", `Z (${DISPLACEMENT_UNIT})`, `Force (${FORCE_UNIT})`]];
+    const csvContent = [["Timestamp", `Z (${DISPLACEMENT_UNIT})`, `Force (${FORCE_UNIT_LABEL})`]];
     dataBuffer.forEach((item) => {
       const displacement = item.displacement == null ? "" : Number(item.displacement);
       const force = item.force == null ? "" : Number(item.force);
       csvContent.push([
         item.timestamp_ms ?? item.timestamp ?? "",
-        Number.isFinite(displacement) ? displacement * METERS_TO_MICROMETERS : "",
-        Number.isFinite(force) ? force * NEWTONS_TO_MICRONEWTONS : "",
+        Number.isFinite(displacement) ? displacement : "",
+        Number.isFinite(force) ? force : "",
       ]);
     });
 
