@@ -80,7 +80,7 @@ class FolderResponse(BaseModel):
     spring_constant: Optional[float] = None
     tip_geometry: Optional[str] = None
     tip_radius: Optional[float] = None
-    sampling_rate: Optional[float] = None
+    tip_angle: Optional[float] = None
     sensor_type: Optional[str] = None
 
     class Config:
@@ -95,7 +95,7 @@ class FolderMetadataUpdate(BaseModel):
     spring_constant: Optional[float] = None
     tip_geometry: Optional[str] = None
     tip_radius: Optional[float] = None
-    sampling_rate: Optional[float] = None
+    tip_angle: Optional[float] = None
     sensor_type: Optional[str] = None
 
 
@@ -109,7 +109,7 @@ class FolderExportMetadataResponse(BaseModel):
     spring_constant: float
     tip_geometry: str
     tip_radius: float
-    sampling_rate: float
+    tip_angle: float
     sensor_type: str
 
 

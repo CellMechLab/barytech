@@ -186,7 +186,7 @@ EXPERIMENT_METADATA_DEFAULTS = {
     "spring_constant": 0.1,
     "tip_geometry": "sphere",
     "tip_radius": 1e-5,
-    "sampling_rate": 1e5,
+    "tip_angle": 0.0,
     "sensor_type": "aurora",
 }
 
@@ -286,7 +286,7 @@ async def upsert_folder_metadata(
         "spring_constant": "spring_constant",
         "tip_geometry": "tip_geometry",
         "tip_radius": "tip_radius",
-        "sampling_rate": "sampling_rate",
+        "tip_angle": "tip_angle",
         "sensor_type": "sensor_type",
     }
     updates = {}
@@ -335,13 +335,15 @@ def get_folder_export_metadata(folder: Folder) -> dict:
         "spring_constant": float(_resolve_folder_metadata_value(folder, "spring_constant")),
         "tip_geometry": str(_resolve_folder_metadata_value(folder, "tip_geometry")),
         "tip_radius": float(_resolve_folder_metadata_value(folder, "tip_radius")),
-        "sampling_rate": float(_resolve_folder_metadata_value(folder, "sampling_rate")),
+        "tip_angle": float(_resolve_folder_metadata_value(folder, "tip_angle")),
         "sensor_type": str(_resolve_folder_metadata_value(folder, "sensor_type")),
     }
 
 
 def _write_tip_metadata_group(tip_group, folder: Folder):
     """Write shared experiment metadata into an HDF5 tip group for one curve."""
+    # Stores tip radius in meters (SI) for explicit tip_radius and legacy value attrs.
+    tip_radius_m = float(_resolve_folder_metadata_value(folder, "tip_radius"))
     tip_group.attrs["velocity"] = float(_resolve_folder_metadata_value(folder, "velocity"))
     tip_group.attrs["force_scale_to_n"] = float(
         _resolve_folder_metadata_value(folder, "force_conversion_factor")
@@ -352,13 +354,14 @@ def _write_tip_metadata_group(tip_group, folder: Folder):
     tip_group.attrs["spring_constant"] = float(
         _resolve_folder_metadata_value(folder, "spring_constant")
     )
-    tip_group.attrs["sampling_rate"] = float(
-        _resolve_folder_metadata_value(folder, "sampling_rate")
-    )
     tip_group.attrs["geometry"] = str(_resolve_folder_metadata_value(folder, "tip_geometry"))
+    tip_group.attrs["tip_geometry"] = str(_resolve_folder_metadata_value(folder, "tip_geometry"))
+    tip_group.attrs["tip_radius"] = tip_radius_m
+    tip_group.attrs["tip_angle"] = float(_resolve_folder_metadata_value(folder, "tip_angle"))
     tip_group.attrs["parameter"] = "Radius"
     tip_group.attrs["unit"] = "um"
-    tip_group.attrs["value"] = float(_resolve_folder_metadata_value(folder, "tip_radius"))
+    # Legacy SoftMech-style radius value stored in micrometers.
+    tip_group.attrs["value"] = tip_radius_m * 1e6
     tip_group.attrs["sensor_type"] = str(_resolve_folder_metadata_value(folder, "sensor_type"))
 
 

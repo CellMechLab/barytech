@@ -27,6 +27,8 @@ class Folder(Base):
     spring_constant = Column(Float, nullable=True)
     tip_geometry = Column(String, nullable=True)
     tip_radius = Column(Float, nullable=True)
+    # Tip half-angle in degrees (cone/pyramid geometries).
+    tip_angle = Column(Float, nullable=True)
     sampling_rate = Column(Float, nullable=True)
     # Force sensor model used for this experiment, e.g. Aurora, CSense.
     sensor_type = Column(String, nullable=True)

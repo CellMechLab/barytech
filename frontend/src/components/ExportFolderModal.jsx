@@ -48,6 +48,7 @@ const EXPORT_METADATA_FIELDS = [
     inputType: "number",
     storageScale: METERS_TO_MILLIMETERS,
   },
+  { key: "tip_angle", label: "Tip angle (deg)", inputType: "number" },
 ];
 
 // Reads the JWT stored at login for authenticated backend requests.
@@ -108,6 +109,7 @@ const ExportFolderModal = ({
             ? loadedTipGeometry
             : "sphere",
           tip_radius: metadata.tip_radius * METERS_TO_MILLIMETERS,
+          tip_angle: metadata.tip_angle,
         });
       } catch (err) {
         console.error("[ExportFolderModal] metadata load failed:", err);

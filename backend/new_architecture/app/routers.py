@@ -363,7 +363,7 @@ async def list_folders(
                     spring_constant=folder.spring_constant,
                     tip_geometry=folder.tip_geometry,
                     tip_radius=folder.tip_radius,
-                    sampling_rate=folder.sampling_rate,
+                    tip_angle=folder.tip_angle,
                     sensor_type=folder.sensor_type,
                 )
             )
