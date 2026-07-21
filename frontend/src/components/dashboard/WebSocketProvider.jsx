@@ -248,7 +248,9 @@ export const WebSocketProvider = ({ children }) => {
           setIndentationStatus(nextIndentationStatus);
         }
 
-        // Store the backend payload exactly as received; chart components choose what to plot.
+        // Store every incoming sample as received, with no idle-based decimation —
+        // all values are forwarded to the buffer (still batched into a single React
+        // update per flush interval, and capped by MAX_DATA_BUFFER_POINTS).
         totalPoints.current += parsedMessages.length;
         queueDataBufferUpdate(parsedMessages);
         
