@@ -1,10 +1,13 @@
+from typing import Optional
+
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # JWT configuration
     SECRET_KEY: str = "your_secret_key"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    # None means the access token never expires; set a positive int to enable expiry.
+    ACCESS_TOKEN_EXPIRE_MINUTES: Optional[int] = None
 
     # Database configuration
     DATABASE_URL: str = "sqlite:///./test.db"

@@ -51,7 +51,9 @@ class DeviceData(Base):
     folder_id = Column(Integer, ForeignKey("folders.id"), nullable=True, index=True)
     # Zero-based index of the save-cycle (ON→OFF) within the folder this row was recorded during.
     curve_index = Column(Integer, default=0, nullable=False)
-    # Indentation phase: 0 = approaching/indenting (segment0), 1 = retracting (segment1).
+    # Indentation phase: 0 = approaching/indenting, 1 = retracting, 2 = delay/dwell
+    # hold between indent and retract. See app/db.py export_folder_to_hdf5 for how
+    # these map to HDF5 segment groups (segment0/segment1/segment2).
     phase = Column(Integer, default=0, nullable=False)
     # Motor activity flag from device telemetry: 0 = idle, 1 = moving.
     motor_working = Column(Integer, default=0, nullable=False)

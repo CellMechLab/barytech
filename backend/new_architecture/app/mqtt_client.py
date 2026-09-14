@@ -45,9 +45,15 @@ def to_int_or_none(value):
     return number
 
 def to_phase_or_default(value):
-    """Normalize phase to 0 (indent) or 1 (retract); default to indent when missing."""
+    """
+    Normalize phase to 0 (indent), 1 (retract), or 2 (delay/dwell — the hold
+    period between indent finishing and retract starting); default to indent
+    when missing or unrecognized. 0/1 numbering is kept as-is for backward
+    compatibility with existing stored rows and HDF5 exports; delay was added
+    afterwards as a new value rather than renumbering the existing two.
+    """
     parsed = to_int_or_none(value)
-    if parsed in (0, 1):
+    if parsed in (0, 1, 2):
         return parsed
     return 0
 
@@ -108,7 +114,10 @@ def normalize_data_point(data_point):
     force_key, force = first_defined_key_and_value(data_point, force_keys)
     if force is None:
         force_key, force = first_defined_key_and_value(state, force_keys)
-    # Phase: 0 = indenting (segment0), 1 = retracting (segment1).
+    # Phase: 0 = indenting (segment0), 1 = retracting (segment2), 2 = delay/dwell
+    # hold between indent and retract (segment1). motor_working stays 1 across
+    # all three sub-phases (see message_processor._accumulate_curve_points),
+    # so a delay period never causes the in-progress curve to flush early.
     phase_raw = first_defined_value(
         data_point,
         ["phase", "Phase", "segment", "segment_type", "segmentType"],

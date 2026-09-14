@@ -37,7 +37,7 @@ class DeviceDataResponse(BaseModel):
     timestamp: datetime = Field(..., description="Time the data was recorded")
     displacement: float = Field(..., description="Displacement in micrometers (µm)")
     force: float = Field(..., description="Force in micronewtons (µN)")
-    # Indentation phase: 0 = indent, 1 = retract.
+    # Indentation phase: 0 = indent, 1 = retract, 2 = delay/dwell hold between them.
     phase: int = 0
     # Motor activity flag: 0 = idle, 1 = moving.
     motor_working: int = 0
@@ -105,7 +105,7 @@ class FolderExportMetadataResponse(BaseModel):
     folder_name: str
     velocity: float
     force_conversion_factor: float
-    z_conversion_factor: float
+    # z_conversion_factor: float  # omitted from HDF5 export
     spring_constant: float
     tip_geometry: str
     tip_radius: float
@@ -139,7 +139,8 @@ class DeviceDataRowResponse(BaseModel):
     folder_id: Optional[int] = None
     # Zero-based index of the save-cycle within the folder.
     curve_index: int = 0
-    # Indentation phase: 0 = indent (segment0), 1 = retract (segment1).
+    # Indentation phase: 0 = indent (segment0), 1 = retract (segment2 in HDF5
+    # export), 2 = delay/dwell hold between indent and retract (segment1).
     phase: int = 0
     # Motor activity flag: 0 = idle, 1 = moving.
     motor_working: int = 0

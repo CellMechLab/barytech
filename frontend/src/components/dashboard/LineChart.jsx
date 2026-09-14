@@ -27,6 +27,12 @@ const CHART_REDRAW_INTERVAL_MS = Math.max(
   Number(process.env.REACT_APP_CHART_REDRAW_INTERVAL_MS) || 250,
   50
 );
+// Minimum horizontal pixels reserved per x-axis tick label so timestamps have
+// room to render without overlapping when the chart is narrow or many samples
+// have arrived (which pushes more ticks into the same visible window).
+const MIN_PX_PER_X_TICK = 65;
+// Minimum vertical pixels reserved per y-axis tick label for the same reason.
+const MIN_PX_PER_Y_TICK = 32;
 
 // Formats Y-axis and tooltip values with fixed decimals or scientific notation.
 const formatChartValue = (value) => {
@@ -34,6 +40,62 @@ const formatChartValue = (value) => {
   if (!Number.isFinite(value)) return "—";
   if (abs === 0) return "0";
   return abs >= 0.01 ? value.toFixed(3) : value.toExponential(2);
+};
+
+// Computes how many axis ticks fit in the given pixel span without crowding.
+// This shrinks automatically as the chart gets narrower/shorter instead of
+// always drawing a fixed count of ticks regardless of available space.
+const getAdaptiveTickCount = (pixelSpan, minPxPerTick) =>
+  Math.max(2, Math.floor(pixelSpan / minPxPerTick));
+
+// Picks a time format whose precision matches how zoomed-in the visible
+// x-domain currently is. A fixed "HH:MM:SS.mmm" format becomes unreadable
+// once samples arrive fast enough that the visible window only spans a
+// couple of seconds — every tick repeats the same hour/minute digits, which
+// wastes the space needed to show the digits that are actually changing.
+const getAdaptiveTimeFormatter = (domainSpanMs) => {
+  if (domainSpanMs < 2000) {
+    // Sub-2s window: hours/minutes never change here, show seconds.milliseconds only.
+    return (xValue) => d3.timeFormat("%S.%L")(new Date(Math.floor(xValue)));
+  }
+  if (domainSpanMs < 60 * 1000) {
+    return (xValue) => d3.timeFormat("%M:%S.%L")(new Date(Math.floor(xValue)));
+  }
+  if (domainSpanMs < 60 * 60 * 1000) {
+    return (xValue) => d3.timeFormat("%H:%M:%S")(new Date(Math.floor(xValue)));
+  }
+  if (domainSpanMs < 24 * 60 * 60 * 1000) {
+    return (xValue) => d3.timeFormat("%H:%M")(new Date(Math.floor(xValue)));
+  }
+  return (xValue) => d3.timeFormat("%b %d %H:%M")(new Date(Math.floor(xValue)));
+};
+
+// Walks rendered axis tick labels in order and hides any label that would
+// overlap the last visible one. This is a safety net for cases the tick-count
+// estimate above doesn't fully cover (unexpected font metrics, very long
+// formatted values, etc.), so labels never visually collide.
+const hideOverlappingTickLabels = (axisGroup, isHorizontalAxis) => {
+  // Tracks the far edge (right for x-axis, bottom for y-axis) of the last label kept visible.
+  let lastVisibleEdge = -Infinity;
+  axisGroup.selectAll(".tick").each(function hideIfOverlapping() {
+    const tickText = d3.select(this).select("text");
+    if (tickText.empty()) return;
+    const bbox = tickText.node().getBBox();
+    const transform = d3.select(this).attr("transform") || "";
+    const translateMatch = /translate\(([-\d.]+)[ ,]([-\d.]+)/.exec(transform);
+    const tickPosition = translateMatch
+      ? Number(translateMatch[isHorizontalAxis ? 1 : 2])
+      : 0;
+    const start = tickPosition + (isHorizontalAxis ? bbox.x : bbox.y);
+    const end = start + (isHorizontalAxis ? bbox.width : bbox.height);
+    // 6px gap keeps adjacent labels visually separated, not just barely non-overlapping.
+    if (start < lastVisibleEdge + 6) {
+      tickText.style("display", "none");
+    } else {
+      tickText.style("display", null);
+      lastVisibleEdge = end;
+    }
+  });
 };
 const LineChart = forwardRef(({ dataset = "force" }, ref) => {
   const theme = useTheme();
@@ -158,9 +220,16 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
     return { points, xValues };
   };
 
-  const transformData = (dataBuffer) => {
+  // `onlyDataset` lets the frequent redraw path skip building/sorting the series this
+  // particular chart instance never renders — each LineChart only ever plots one of
+  // force/displacement, so computing both on every redraw wastes CPU on slower hardware
+  // (e.g. a Raspberry Pi) once the buffer holds thousands of high-rate samples.
+  // Defaults to computing both so the ref API (used by CSV/legacy consumers) is unchanged.
+  const transformData = (dataBuffer, onlyDataset = null) => {
     const series1 = [];
     const series2 = [];
+    const needsDisplacement = onlyDataset !== "force";
+    const needsForce = onlyDataset == null || onlyDataset === "force";
     const { points, xValues } = resolvePlotXValues(dataBuffer);
     const latestPoint = points[points.length - 1];
     const shouldDeferLatestGroup =
@@ -171,8 +240,11 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         item.timestamp_ms ?? item.timestamp ?? item.time ?? item.t;
       const xValue = xValues[index];
       const displacement =
-        item.displacement == null ? NaN : Number(item.displacement);
-      const force = item.force == null ? NaN : Number(item.force);
+        !needsDisplacement || item.displacement == null
+          ? NaN
+          : Number(item.displacement);
+      const force =
+        !needsForce || item.force == null ? NaN : Number(item.force);
 
       if (Number.isFinite(displacement)) {
         series1.push({
@@ -203,6 +275,61 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
     series2.sort((a, b) => a.xValue - b.xValue);
 
     return { series1, series2 };
+  };
+
+  // Reduces a chronologically-sorted series to roughly one min/max value-pair per
+  // horizontal pixel column. Drawing more than that is wasted work — the extra points
+  // land on the same pixel and are visually indistinguishable — but it's exactly what
+  // happens once samples arrive in the hundreds/thousands per second, so this is the
+  // single biggest lever for keeping the chart smooth on constrained hardware.
+  const downsampleForRender = (sortedSeries, chartWidth, xDomain) => {
+    const pointCount = sortedSeries.length;
+    const bucketCount = Math.max(1, Math.floor(chartWidth));
+    // Already at or below the target resolution — downsampling would only cost extra work.
+    if (pointCount <= bucketCount * 2) return sortedSeries;
+
+    const [xStart, xEnd] = xDomain;
+    const xSpan = xEnd - xStart || 1;
+    const downsampled = [];
+    let bucketStartIndex = 0;
+
+    for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+      const bucketEndX = xStart + ((bucket + 1) / bucketCount) * xSpan;
+      let bucketEndIndex = bucketStartIndex;
+      while (
+        bucketEndIndex < pointCount &&
+        sortedSeries[bucketEndIndex].xValue <= bucketEndX
+      ) {
+        bucketEndIndex += 1;
+      }
+
+      if (bucketEndIndex > bucketStartIndex) {
+        let minPoint = sortedSeries[bucketStartIndex];
+        let maxPoint = sortedSeries[bucketStartIndex];
+        for (let i = bucketStartIndex + 1; i < bucketEndIndex; i += 1) {
+          const point = sortedSeries[i];
+          if (point.value < minPoint.value) minPoint = point;
+          if (point.value > maxPoint.value) maxPoint = point;
+        }
+
+        if (minPoint === maxPoint) {
+          downsampled.push(minPoint);
+        } else if (minPoint.xValue <= maxPoint.xValue) {
+          // Keep chronological order within the bucket so the line doesn't zig-zag backwards.
+          downsampled.push(minPoint, maxPoint);
+        } else {
+          downsampled.push(maxPoint, minPoint);
+        }
+        bucketStartIndex = bucketEndIndex;
+      }
+    }
+
+    // Any leftover points past the last full bucket (rounding) are kept as-is.
+    for (let i = bucketStartIndex; i < pointCount; i += 1) {
+      downsampled.push(sortedSeries[i]);
+    }
+
+    return downsampled;
   };
 
   const downloadDataBufferAsCSV = () => {
@@ -278,7 +405,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
       const axisLineColor = activeColors.grey?.[400] || "#858585";
       d3.select(chartRef.current).selectAll("*").remove();
 
-      const data = transformData(activeDataBuffer);
+      const data = transformData(activeDataBuffer, activeDataset);
       const { series1, series2 } = data;
       const fullSeries = activeDataset === "force" ? series2 : series1;
       const series = fullSeries.filter((point) => point.isStable);
@@ -350,9 +477,14 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         .x((d) => x(d.xValue))
         .y((d) => y(d.value));
 
+      // Down to ~1-2 rendered points per pixel column — see downsampleForRender above.
+      // The full-resolution `series` is kept around for accurate tooltip lookups and for
+      // re-slicing/re-downsampling whenever the brush below zooms into a narrower window.
+      const renderSeries = downsampleForRender(series, chartWidth, xDomain);
+
       linesGroup
         .append("path")
-        .datum(series)
+        .datum(renderSeries)
         .attr("class", `line line-${activeDataset}`)
         .attr("d", line)
         .attr("stroke", activeDataset === "force" ? "#FF9800" : "#009688")
@@ -392,31 +524,82 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         tooltip.style("display", "none");
       }
 
-      const showPointMarkers = series.length <= 1000;
-      const circles = showPointMarkers
-        ? linesGroup
-            .selectAll(`.point-${activeDataset}`)
-            .data(series)
-            .enter()
-            .append("circle")
-            .attr("class", `point-${activeDataset}`)
-            .attr("cx", (d) => x(d.xValue))
-            .attr("cy", (d) => y(d.value))
-            .attr("r", 4)
-            .attr("fill", activeDataset === "force" ? "#FF9800" : "#009688")
-            .on("mouseover", (event, d) => showTooltip(event, d, activeDataset === "force" ? "Force" : "Z"))
-            .on("mousemove", moveTooltip)
-            .on("mouseout", hideTooltip)
-        : linesGroup.selectAll(`.point-${activeDataset}`);
+      // Renders visible dot markers for a (already downsampled) set of points using D3's
+      // enter/update/exit join, so re-invoking this after a brush/zoom just patches the
+      // existing circles instead of tearing them all down and reattaching listeners.
+      // Markers carry no listeners of their own — see the shared pointer overlay below —
+      // which matters once thousands of samples/sec would otherwise mean thousands of
+      // per-circle mouse handlers.
+      const MAX_RENDERED_MARKERS = 600;
+      function renderPointMarkers(pointsToRender) {
+        const visiblePoints =
+          pointsToRender.length <= MAX_RENDERED_MARKERS ? pointsToRender : [];
+        return linesGroup
+          .selectAll(`.point-${activeDataset}`)
+          .data(visiblePoints)
+          .join("circle")
+          .attr("class", `point-${activeDataset}`)
+          .attr("cx", (d) => x(d.xValue))
+          .attr("cy", (d) => y(d.value))
+          .attr("r", 4)
+          .attr("fill", activeDataset === "force" ? "#FF9800" : "#009688");
+      }
+
+      renderPointMarkers(renderSeries);
+
+      // Finds the closest real (full-resolution) sample to a pointer x-position via binary
+      // search, so hovering anywhere over the chart shows an accurate tooltip in O(log n)
+      // regardless of how many raw points are buffered — a single listener here replaces
+      // what used to be one mouseover/mousemove/mouseout triple per rendered point.
+      const bisectXValue = d3.bisector((d) => d.xValue).left;
+      // `currentSeries`/`currentX` are updated by `brushed()` below so this overlay keeps
+      // resolving against whatever data/scale is currently zoomed in, without re-registering listeners.
+      let currentSeries = series;
+      let currentX = x;
+
+      function findNearestPoint(targetXValue) {
+        const insertionIndex = bisectXValue(currentSeries, targetXValue);
+        const candidateBefore = currentSeries[insertionIndex - 1];
+        const candidateAfter = currentSeries[insertionIndex];
+        if (!candidateBefore) return candidateAfter;
+        if (!candidateAfter) return candidateBefore;
+        return Math.abs(candidateBefore.xValue - targetXValue) <=
+          Math.abs(candidateAfter.xValue - targetXValue)
+          ? candidateBefore
+          : candidateAfter;
+      }
+
+      chartGroup
+        .append("rect")
+        .attr("class", "pointer-overlay")
+        .attr("width", chartWidth)
+        .attr("height", chartHeight)
+        .attr("fill", "transparent")
+        .style("cursor", "crosshair")
+        .on("mousemove", (event) => {
+          const [pointerX] = d3.pointer(event);
+          const nearestPoint = findNearestPoint(currentX.invert(pointerX));
+          if (!nearestPoint) return;
+          showTooltip(event, nearestPoint, activeDataset === "force" ? "Force" : "Z");
+          moveTooltip(event);
+        })
+        .on("mouseout", hideTooltip);
+
+      // Tick count/format both scale with the current view instead of a fixed "10 ticks,
+      // full HH:MM:SS.mmm" layout, so labels stay legible whether the visible window
+      // spans hours or a fast-arriving burst of samples a few seconds wide.
+      const xTickCount = getAdaptiveTickCount(chartWidth, MIN_PX_PER_X_TICK);
+      const xTickFormatter = getAdaptiveTimeFormatter(xDomain[1] - xDomain[0]);
 
       const xAxisGroup = chartGroup
         .append("g")
         .attr("class", "x-axis")
         .attr("transform", `translate(0,${chartHeight})`)
-        .call(d3.axisBottom(x).ticks(10).tickFormat(formatTimestamp));
+        .call(d3.axisBottom(x).ticks(xTickCount).tickFormat(xTickFormatter));
 
       xAxisGroup.selectAll(".tick text").attr("fill", axisTextColor);
       xAxisGroup.selectAll(".tick line, .domain").attr("stroke", axisLineColor);
+      hideOverlappingTickLabels(xAxisGroup, true);
 
       xAxisGroup
         .append("text")
@@ -427,18 +610,21 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
         .attr("text-anchor", "middle")
         .text("Time");
 
+      // Y-axis tick count also scales with the available height for the same reason.
+      const yTickCount = getAdaptiveTickCount(chartHeight, MIN_PX_PER_Y_TICK);
       const yAxisGroup = chartGroup
         .append("g")
         .attr("class", "y-axis")
         .call(
           d3
             .axisLeft(y)
-            .ticks(10)
+            .ticks(yTickCount)
             .tickFormat((d) => formatChartValue(d))
         );
 
       yAxisGroup.selectAll(".tick text").attr("fill", axisTextColor);
       yAxisGroup.selectAll(".tick line, .domain").attr("stroke", axisLineColor);
+      hideOverlappingTickLabels(yAxisGroup, false);
 
       yAxisGroup
         .append("text")
@@ -457,7 +643,7 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
 
       navGroup
         .append("path")
-        .datum(series)
+        .datum(renderSeries)
         .attr("class", "line")
         .attr("d", navLine)
         .attr("stroke", activeDataset === "force" ? "#FF9800" : "#009688")
@@ -535,23 +721,45 @@ const LineChart = forwardRef(({ dataset = "force" }, ref) => {
             ]).nice();
           }
 
-          linesGroup.select(`.line-${activeDataset}`).attr("d", line);
+          // Re-downsample from the full-resolution series for just the zoomed-in window —
+          // reusing the original whole-buffer downsample here would hide the extra detail
+          // zooming in is supposed to reveal.
+          const zoomedRenderSeries = filteredSeries.length
+            ? downsampleForRender(filteredSeries, chartWidth, [x0, x1])
+            : [];
 
-          circles
-            .attr("cx", (d) => x(d.xValue))
-            .attr("cy", (d) => y(d.value));
+          linesGroup
+            .select(`.line-${activeDataset}`)
+            .datum(zoomedRenderSeries)
+            .attr("d", line);
 
-          xAxisGroup.call(d3.axisBottom(x).ticks(10).tickFormat(formatTimestamp));
+          renderPointMarkers(zoomedRenderSeries);
+
+          // Keeps the shared pointer-overlay tooltip resolving against the zoomed window.
+          currentSeries = filteredSeries.length ? filteredSeries : series;
+          currentX = x;
+
+          // Re-derive tick count/format for the zoomed-in domain so a brushed
+          // selection spanning only a second or two still gets readable, non-repetitive labels.
+          const zoomedXTickCount = getAdaptiveTickCount(chartWidth, MIN_PX_PER_X_TICK);
+          const zoomedXTickFormatter = getAdaptiveTimeFormatter(x1 - x0);
+          xAxisGroup.call(
+            d3.axisBottom(x).ticks(zoomedXTickCount).tickFormat(zoomedXTickFormatter)
+          );
           xAxisGroup.selectAll(".tick text").attr("fill", axisTextColor);
           xAxisGroup.selectAll(".tick line, .domain").attr("stroke", axisLineColor);
+          hideOverlappingTickLabels(xAxisGroup, true);
+
+          const zoomedYTickCount = getAdaptiveTickCount(chartHeight, MIN_PX_PER_Y_TICK);
           yAxisGroup.call(
             d3
               .axisLeft(y)
-              .ticks(10)
+              .ticks(zoomedYTickCount)
               .tickFormat((d) => formatChartValue(d))
           );
           yAxisGroup.selectAll(".tick text").attr("fill", axisTextColor);
           yAxisGroup.selectAll(".tick line, .domain").attr("stroke", axisLineColor);
+          hideOverlappingTickLabels(yAxisGroup, false);
 
           updateHandles(selection);
         }

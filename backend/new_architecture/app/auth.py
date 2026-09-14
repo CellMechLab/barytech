@@ -31,13 +31,13 @@ def normalize_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
 
-def create_access_token(data: dict, expires_delta: timedelta = None):
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
+    # Copy payload so callers are not mutated when optional expiry is applied.
     to_encode = data.copy()
-    if expires_delta:
+    # Omit exp when expires_delta is None so the token remains valid indefinitely.
+    if expires_delta is not None:
         expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
+        to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
@@ -79,10 +79,15 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         if not user or not pwd_context.verify(normalize_password(form_data.password), user.hashed_password):
             raise HTTPException(status_code=400, detail="Incorrect username or password")
 
-        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        # Issue a non-expiring token when ACCESS_TOKEN_EXPIRE_MINUTES is unset.
+        access_token_expires = (
+            timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+            if settings.ACCESS_TOKEN_EXPIRE_MINUTES is not None
+            else None
+        )
         access_token = create_access_token(
             data={"sub": user.username, "user_id": user.id},
-            expires_delta=access_token_expires
+            expires_delta=access_token_expires,
         )
         return {"access_token": access_token, "token_type": "bearer", "user_id": user.id}
 

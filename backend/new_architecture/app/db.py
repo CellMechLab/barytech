@@ -329,9 +329,9 @@ def get_folder_export_metadata(folder: Folder) -> dict:
         "force_conversion_factor": float(
             _resolve_folder_metadata_value(folder, "force_conversion_factor")
         ),
-        "z_conversion_factor": float(
-            _resolve_folder_metadata_value(folder, "z_conversion_factor")
-        ),
+        # "z_conversion_factor": float(
+        #     _resolve_folder_metadata_value(folder, "z_conversion_factor")
+        # ),
         "spring_constant": float(_resolve_folder_metadata_value(folder, "spring_constant")),
         "tip_geometry": str(_resolve_folder_metadata_value(folder, "tip_geometry")),
         "tip_radius": float(_resolve_folder_metadata_value(folder, "tip_radius")),
@@ -348,9 +348,9 @@ def _write_tip_metadata_group(tip_group, folder: Folder):
     tip_group.attrs["force_scale_to_n"] = float(
         _resolve_folder_metadata_value(folder, "force_conversion_factor")
     )
-    tip_group.attrs["z_scale_to_m"] = float(
-        _resolve_folder_metadata_value(folder, "z_conversion_factor")
-    )
+    # tip_group.attrs["z_scale_to_m"] = float(
+    #     _resolve_folder_metadata_value(folder, "z_conversion_factor")
+    # )
     tip_group.attrs["spring_constant"] = float(
         _resolve_folder_metadata_value(folder, "spring_constant")
     )
@@ -371,11 +371,18 @@ async def export_folder_to_hdf5(file_path: str, folder_id: int, user_id: int) ->
     The file is structured as:
         curve0/segment0/Force   — indent phase (phase=0)
         curve0/segment0/Z
-        curve0/segment1/Force   — retract phase (phase=1)
-        curve0/segment1/Z
+        curve0/segment1/Force   — delay/dwell phase (phase=2), the hold between
+        curve0/segment1/Z         indent finishing and retract starting
+        curve0/segment2/Force   — retract phase (phase=1)
+        curve0/segment2/Z
         curve0/tip              — shared experiment metadata from folder
         curve1/…
         …
+
+    Segments are numbered by chronological order (indent → delay → retract),
+    not by raw phase value — retract is stored as phase=1 in the DB (kept
+    unchanged for backward compatibility) but exported as segment2 since delay
+    (phase=2) sits between it and indent in time. See PHASE_TO_EXPORT_SEGMENT.
 
     Rows are queried from device_data filtered by folder_id and ordered by
     curve_index then timestamp so each curve is written in chronological order.
@@ -407,18 +414,28 @@ async def export_folder_to_hdf5(file_path: str, folder_id: int, user_id: int) ->
             # 400, not 404 — the folder exists but contains no recorded device_data yet.
             raise HTTPException(status_code=400, detail="This folder has no recorded data yet. Start a save session with this folder selected first.")
 
-        # Group rows by curve_index, then split each curve by phase (segment0/segment1).
+        # Group rows by curve_index, then split each curve by phase into
+        # chronologically-ordered HDF5 segments: indent → delay → retract.
+        # Maps stored DB phase value -> export segment key. Retract keeps its
+        # original phase=1 in the DB (backward compatible with existing rows)
+        # but is exported as segment2 because delay (phase=2) sits between
+        # indent and retract in time.
+        PHASE_TO_EXPORT_SEGMENT = {
+            0: "segment0",  # indent
+            2: "segment1",  # delay/dwell hold
+            1: "segment2",  # retract
+        }
+        EXPORT_SEGMENT_NAMES = ("segment0", "segment1", "segment2")
+
         curves: dict = {}
         for row in rows:
             idx = row.curve_index if row.curve_index is not None else 0
             if idx not in curves:
                 curves[idx] = {
-                    "segment0": {"force": [], "z": []},
-                    "segment1": {"force": [], "z": []},
+                    name: {"force": [], "z": []} for name in EXPORT_SEGMENT_NAMES
                 }
-            # phase 0 → segment0 (indent), phase 1 → segment1 (retract).
-            phase = row.phase if row.phase in (0, 1) else 0
-            segment_key = "segment0" if phase == 0 else "segment1"
+            # Fall back to indent's segment for any unrecognized/legacy phase value.
+            segment_key = PHASE_TO_EXPORT_SEGMENT.get(row.phase, "segment0")
             force = _export_force_value(row.force)
             z = _to_float_or_none(row.displacement)
             if force is None or z is None:
@@ -427,7 +444,7 @@ async def export_folder_to_hdf5(file_path: str, folder_id: int, user_id: int) ->
             curves[idx][segment_key]["z"].append(z)
 
         total_rows = sum(
-            len(curve_data["segment0"]["force"]) + len(curve_data["segment1"]["force"])
+            sum(len(curve_data[name]["force"]) for name in EXPORT_SEGMENT_NAMES)
             for curve_data in curves.values()
         )
         if total_rows == 0:
@@ -442,7 +459,7 @@ async def export_folder_to_hdf5(file_path: str, folder_id: int, user_id: int) ->
                 curve_group = hdf.create_group(f"curve{curve_idx}")
                 curve_data = curves[curve_idx]
 
-                for segment_name in ("segment0", "segment1"):
+                for segment_name in EXPORT_SEGMENT_NAMES:
                     segment_values = curve_data[segment_name]
                     if not segment_values["force"]:
                         continue
