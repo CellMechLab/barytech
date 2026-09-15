@@ -235,53 +235,79 @@ class Printer:
 
     def home(self, axes: Optional[list[str]] = None) -> dict:
         """
-        Home Z axis by jogging G1 Z-<step_mm> at a time until the GPIO
-        limit switch (Z_MIN, BCM pin 4) is triggered (pin pulled LOW).
+        Home X, Y, then Z by jogging toward each GPIO limit switch until
+        the pin is pulled LOW (triggered).
 
         Does NOT send G28 — homing is done entirely via GPIO feedback.
 
-        Sequence per step:
-            1. Send G1 Z-<step_mm> F600  (relative jog toward home end)
-            2. Send M400                 (block until motor physically stops)
-            3. Read GPIO — if Z_MIN is LOW (triggered), stop immediately.
+        Default order (always X → Y → Z when axes is None / full home):
+            X_MIN (BCM 27)  seek G1 X+0.5, backoff X-
+            Y_MIN (BCM 17)  seek G1 Y+0.5, backoff Y-
+            Z_MIN (BCM 4)   seek G1 Z-0.5, backoff Z+
 
-        After the switch triggers, jog +backoff_mm in Z so the pin is no
-        longer grounded (switch opens, pin HIGH).
+        Per-axis sequence:
+            1. Send G1 <axis><dir><step_mm> F600
+            2. Send M400 (block until motor physically stops)
+            3. Read GPIO — if switch is LOW (triggered), stop immediately
+            4. Back off opposite direction so the switch opens again
 
         M400 is critical: Marlin's 'ok' for G1 only means the command was
-        enqueued, not that the motor stopped.  Without M400 the planner buffer
-        fills with several steps ahead, and the motor keeps running for
-        multiple steps after GPIO triggers.
+        enqueued, not that the motor stopped.
 
-        *axes* is accepted for API compatibility but only Z is homed.
+        *axes* may restrict which axes to home (e.g. ["X"]). Order among
+        requested axes still follows X → Y → Z.
 
-        Returns a dict with homing result details.
-        Raises RuntimeError if the switch is never triggered within max_steps.
+        Returns a dict with per-axis homing results.
+        Raises RuntimeError if any switch is never triggered within max_steps.
         """
         import gpio_manager
 
-        # GPIO name defined in gpio_manager.LIMIT_SWITCH_PINS (BCM pin 4)
-        switch_name  = "Z_MIN"
-        # Jog distance per iteration toward the switch (mm)
-        step_mm      = 0.5
-        # Retract (+Z) after trigger so the switch opens again
-        backoff_mm   = 1.0
+        # Per-axis seek config: switch name, seek sign (+1 / -1), step, backoff
+        # Seek sign is the firmware G1 direction toward the limit switch.
+        axis_home_cfg: dict[str, dict] = {
+            "X": {
+                "switch": "X_MIN",
+                "seek_sign": +1,   # G1 X+0.5 toward switch
+                "step_mm": 0.5,
+                "backoff_mm": 1.0,
+            },
+            "Y": {
+                "switch": "Y_MIN",
+                "seek_sign": +1,   # G1 Y+0.5 toward switch
+                "step_mm": 0.5,
+                "backoff_mm": 1.0,
+            },
+            "Z": {
+                "switch": "Z_MIN",
+                "seek_sign": -1,   # G1 Z-0.5 toward switch
+                "step_mm": 0.5,
+                "backoff_mm": 1.0,
+            },
+        }
+        # Fixed home order regardless of caller request list
+        home_order = ("X", "Y", "Z")
         # Slow feed rate for safe approach (mm/min)
-        homing_feed  = 600
+        homing_feed = 600
         # Safety cutoff (~300 mm max travel at 0.5 mm/step)
-        max_steps    = 600
+        max_steps = 600
 
         if axes:
-            requested = [a.upper() for a in axes]
-            if "Z" not in requested:
-                logger.warning(
-                    "home: only Z limit-switch homing is supported; ignoring axes=%s",
-                    requested,
+            requested = {a.upper() for a in axes}
+            unknown = requested - set(home_order)
+            if unknown:
+                logger.warning("home: ignoring unknown axes=%s", sorted(unknown))
+            to_home = [ax for ax in home_order if ax in requested]
+            if not to_home:
+                raise RuntimeError(
+                    f"No supported axes to home from request={list(axes)}; "
+                    f"supported={list(home_order)}"
                 )
+        else:
+            to_home = list(home_order)
 
         logger.info(
-            "home: limit-switch seek on -Z  step=%.1f mm  feed=%d mm/min  switch=%s",
-            step_mm, homing_feed, switch_name,
+            "home: limit-switch sequence %s  feed=%d mm/min",
+            " → ".join(to_home), homing_feed,
         )
 
         with self._lock:
@@ -293,74 +319,98 @@ class Printer:
                     "Check RPi.GPIO wiring on the Pi."
                 )
 
-            # True when Z is already seated on the switch before homing starts
-            already_at_switch = gpio_manager.is_triggered(switch_name)
-            if already_at_switch:
-                logger.info(
-                    "home: %s already triggered — will back off %.1f mm",
-                    switch_name, backoff_mm,
-                )
-
             self._ser.reset_input_buffer()
             self._send_locked("G91")   # relative mode for repeated jogs
 
-            steps_taken = 0
-            if not already_at_switch:
-                for _ in range(max_steps):
-                    # Jog one step toward the Z limit switch (G1 Z-0.5).
-                    self._send_locked(f"G1 Z-{step_mm:g} F{homing_feed}")
+            # Collect per-axis outcome for the API response
+            results: dict[str, dict] = {}
 
-                    # M400 blocks until the planner queue is drained and the motor
-                    # has physically stopped.  Without this, Marlin's 'ok' for G1
-                    # only means the command was enqueued — the buffer can hold
-                    # many moves ahead, so GPIO would be checked while several
-                    # queued steps are still executing, causing the late stop.
-                    self._send_locked("M400")
-                    steps_taken += 1
+            try:
+                for axis in to_home:
+                    cfg = axis_home_cfg[axis]
+                    switch_name = cfg["switch"]
+                    step_mm = float(cfg["step_mm"])
+                    backoff_mm = float(cfg["backoff_mm"])
+                    seek_sign = int(cfg["seek_sign"])
+                    # Opposite of seek — used to release the switch after contact
+                    backoff_sign = -seek_sign
+                    seek_delta = seek_sign * step_mm
+                    backoff_delta = backoff_sign * backoff_mm
 
-                    # Check limit switch after the move is physically complete.
-                    # Pin LOW (grounded) = switch triggered = stop.
-                    if gpio_manager.is_triggered(switch_name):
-                        logger.info(
-                            "home: %s triggered after %d step(s) (%.1f mm)",
-                            switch_name, steps_taken, steps_taken * step_mm,
-                        )
-                        break
-
-                if not gpio_manager.is_triggered(switch_name):
-                    self._send_locked("G90")   # restore absolute before raising
-                    raise RuntimeError(
-                        f"Homing failed: {switch_name} not triggered after "
-                        f"{steps_taken} step(s) of {step_mm} mm on -Z axis. "
-                        f"Check wiring or increase max_steps."
+                    logger.info(
+                        "home: seeking %s  switch=%s  step=%+.1f mm",
+                        axis, switch_name, seek_delta,
                     )
 
-            # Retract away from the switch so the pin is no longer grounded.
-            logger.info(
-                "home: backing off %.1f mm (+Z) to release %s",
-                backoff_mm, switch_name,
-            )
-            self._send_locked(f"G1 Z+{backoff_mm:g} F{homing_feed}")
-            self._send_locked("M400")
+                    # True when already seated on the switch before this axis starts
+                    already_at_switch = gpio_manager.is_triggered(switch_name)
+                    if already_at_switch:
+                        logger.info(
+                            "home: %s already triggered — will back off %+.1f mm",
+                            switch_name, backoff_delta,
+                        )
 
-            switch_released = not gpio_manager.is_triggered(switch_name)
-            if not switch_released:
-                logger.warning(
-                    "home: %s still grounded after %.1f mm backoff",
-                    switch_name, backoff_mm,
-                )
+                    steps_taken = 0
+                    if not already_at_switch:
+                        for _ in range(max_steps):
+                            # Jog one step toward the limit switch.
+                            self._send_locked(
+                                f"G1 {axis}{seek_delta:+g} F{homing_feed}"
+                            )
+                            # M400 waits until the motor has physically stopped.
+                            self._send_locked("M400")
+                            steps_taken += 1
 
-            self._send_locked("G90")   # restore absolute positioning
+                            if gpio_manager.is_triggered(switch_name):
+                                logger.info(
+                                    "home: %s triggered after %d step(s) (%.1f mm)",
+                                    switch_name, steps_taken, steps_taken * step_mm,
+                                )
+                                break
+
+                        if not gpio_manager.is_triggered(switch_name):
+                            raise RuntimeError(
+                                f"Homing failed: {switch_name} not triggered after "
+                                f"{steps_taken} step(s) of {step_mm} mm on "
+                                f"{axis}{'+' if seek_sign > 0 else '-'} axis. "
+                                f"Check wiring or increase max_steps."
+                            )
+
+                    # Retract away from the switch so the pin is no longer grounded.
+                    logger.info(
+                        "home: backing off %+.1f mm on %s to release %s",
+                        backoff_delta, axis, switch_name,
+                    )
+                    self._send_locked(
+                        f"G1 {axis}{backoff_delta:+g} F{homing_feed}"
+                    )
+                    self._send_locked("M400")
+
+                    switch_released = not gpio_manager.is_triggered(switch_name)
+                    if not switch_released:
+                        logger.warning(
+                            "home: %s still grounded after %.1f mm backoff",
+                            switch_name, backoff_mm,
+                        )
+
+                    results[axis] = {
+                        "switch":            switch_name,
+                        "reached_switch":    True,
+                        "steps":             steps_taken,
+                        "distance_mm":       round(steps_taken * step_mm, 3),
+                        "seek_delta_mm":     seek_delta,
+                        "backoff_mm":        backoff_mm,
+                        "switch_released":   switch_released,
+                        "already_at_switch": already_at_switch,
+                    }
+            finally:
+                # Always restore absolute mode even if an axis fails mid-sequence
+                self._send_locked("G90")
 
             return {
-                "method":            "limit_switch",
-                "switch":            switch_name,
-                "reached_switch":    True,
-                "steps":             steps_taken,
-                "distance_mm":       round(steps_taken * step_mm, 3),
-                "backoff_mm":        backoff_mm,
-                "switch_released":   switch_released,
-                "already_at_switch": already_at_switch,
+                "method":  "limit_switch",
+                "axes":    to_home,
+                "results": results,
             }
 
     def emergency_stop(self) -> None:

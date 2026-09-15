@@ -11,8 +11,8 @@ Wiring convention:
 
 Pin assignment (BCM numbering) — edit to match your wiring:
     Z_MIN → GPIO 4
-    Y_MIN → GPIO 27   (uncomment when wired)
-    X_MIN → GPIO 17  (uncomment when wired)
+    Y_MIN → GPIO 17
+    X_MIN → GPIO 27
 
 A background monitor polls pins and logs whenever a switch is pressed
 or released so you can verify wiring without running a home cycle.
@@ -30,9 +30,9 @@ log = logging.getLogger("gpio")
 # ---------------------------------------------------------------------------
 
 LIMIT_SWITCH_PINS: dict[str, int] = {
+    "X_MIN": 27,
+    "Y_MIN": 17,
     "Z_MIN": 4,
-    # "Y_MIN": 27,
-    # "X_MIN": 17,
 }
 
 # How often the background monitor samples pin state (seconds)

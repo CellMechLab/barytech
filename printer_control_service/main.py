@@ -13,8 +13,10 @@ Movement limits enforced here (soft limits, before any G-code is sent):
     E : unlimited
 
 Homing (action "home"):
-    Does not send G28.  Jogs Z with G1 Z-0.5 until the GPIO
-    limit switch Z_MIN on BCM pin 4 (gpio_manager) reads triggered (pin LOW).
+    Does not send G28.  Homes axes in order X → Y → Z via GPIO limit switches:
+        X_MIN BCM 27  →  G1 X+0.5 until triggered, then backoff X-
+        Y_MIN BCM 17  →  G1 Y+0.5 until triggered, then backoff Y-
+        Z_MIN BCM 4   →  G1 Z-0.5 until triggered, then backoff Z+
 
 Z-axis inversion:
     This machine's Z motor is physically inverted.
@@ -333,14 +335,14 @@ async def _dispatch(action: str, params: dict) -> dict:
             "feed":           feed,
         }
 
-    # ── Home (Z via GPIO limit switch — no G28) ───────────────────────────
+    # ── Home (X → Y → Z via GPIO limit switches — no G28) ─────────────────
     if action == "home":
-        axes = params.get("axes")   # optional; only Z is homed via Z_MIN switch
+        axes = params.get("axes")   # optional; default homes X then Y then Z
 
         switch_states = gpio_manager.read_limit_switches()
         log.info(
             "HOMING  method=limit_switch  axes=%s  switches=%s",
-            axes or ["Z"], switch_states,
+            axes or ["X", "Y", "Z"], switch_states,
         )
 
         try:
@@ -356,13 +358,9 @@ async def _dispatch(action: str, params: dict) -> dict:
         log.info("HOMING COMPLETE  %s", result)
         return {
             "homed": True,
-            "axes": ["Z"],
+            "axes": result.get("axes", ["X", "Y", "Z"]),
             "method": result.get("method", "limit_switch"),
-            "steps": result.get("steps"),
-            "switch": result.get("switch"),
-            "backoff_mm": result.get("backoff_mm"),
-            "switch_released": result.get("switch_released"),
-            "already_at_switch": result.get("already_at_switch", False),
+            "results": result.get("results"),
             "switches": gpio_manager.read_limit_switches(),
         }
 
