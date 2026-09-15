@@ -360,6 +360,8 @@ async def _dispatch(action: str, params: dict) -> dict:
             "method": result.get("method", "limit_switch"),
             "steps": result.get("steps"),
             "switch": result.get("switch"),
+            "backoff_mm": result.get("backoff_mm"),
+            "switch_released": result.get("switch_released"),
             "already_at_switch": result.get("already_at_switch", False),
             "switches": gpio_manager.read_limit_switches(),
         }

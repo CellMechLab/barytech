@@ -246,6 +246,9 @@ class Printer:
             2. Send M400                 (block until motor physically stops)
             3. Read GPIO — if X_MIN is LOW (triggered), stop immediately.
 
+        After the switch triggers, jog +backoff_mm in X so the pin is no
+        longer grounded (switch opens, pin HIGH).
+
         M400 is critical: Marlin's 'ok' for G1 only means the command was
         enqueued, not that the motor stopped.  Without M400 the planner buffer
         fills with several steps ahead, and the motor keeps running for
@@ -259,9 +262,10 @@ class Printer:
         import gpio_manager
 
         switch_name  = "X_MIN"   # GPIO name defined in gpio_manager.LIMIT_SWITCH_PINS
-        step_mm      = 1.0        # jog distance per iteration (mm)
+        step_mm      = 0.1        # jog distance per iteration (mm)
+        backoff_mm   = 1.0        # retract (+X) after trigger so switch opens
         homing_feed  = 600        # slow feed rate for safe approach (mm/min)
-        max_steps    = 300        # safety cutoff (~300 mm max travel at 1 mm/step)
+        max_steps    = 600        # safety cutoff (~300 mm max travel at 0.5 mm/step)
 
         if axes:
             requested = [a.upper() for a in axes]
@@ -279,58 +283,70 @@ class Printer:
         with self._lock:
             self._require_connected()
 
-            # Already seated on the switch — nothing to move.
-            if gpio_manager.is_triggered(switch_name):
-                logger.info("home: %s already triggered — X already at home", switch_name)
-                return {
-                    "method":            "limit_switch",
-                    "switch":            switch_name,
-                    "reached_switch":    True,
-                    "steps":             0,
-                    "distance_mm":       0.0,
-                    "already_at_switch": True,
-                }
-
             if not gpio_manager.gpio_available():
                 raise RuntimeError(
                     "GPIO not available — cannot home via limit switch. "
                     "Check RPi.GPIO wiring on the Pi."
                 )
 
+            # True when X is already seated on the switch before homing starts
+            already_at_switch = gpio_manager.is_triggered(switch_name)
+            if already_at_switch:
+                logger.info(
+                    "home: %s already triggered — will back off %.1f mm",
+                    switch_name, backoff_mm,
+                )
+
             self._ser.reset_input_buffer()
             self._send_locked("G91")   # relative mode for repeated jogs
 
             steps_taken = 0
-            for _ in range(max_steps):
-                # Jog one step toward the limit switch.
-                self._send_locked(f"G1 X-{step_mm:g} F{homing_feed}")
+            if not already_at_switch:
+                for _ in range(max_steps):
+                    # Jog one step toward the limit switch.
+                    self._send_locked(f"G1 X-{step_mm:g} F{homing_feed}")
 
-                # M400 blocks until the planner queue is drained and the motor
-                # has physically stopped.  Without this, Marlin's 'ok' for G1
-                # only means the command was enqueued — the buffer can hold
-                # many moves ahead, so GPIO would be checked while several
-                # queued steps are still executing, causing the late stop.
-                self._send_locked("M400")
-                steps_taken += 1
+                    # M400 blocks until the planner queue is drained and the motor
+                    # has physically stopped.  Without this, Marlin's 'ok' for G1
+                    # only means the command was enqueued — the buffer can hold
+                    # many moves ahead, so GPIO would be checked while several
+                    # queued steps are still executing, causing the late stop.
+                    self._send_locked("M400")
+                    steps_taken += 1
 
-                # Check limit switch after the move is physically complete.
-                # Pin LOW (grounded) = switch triggered = stop.
-                if gpio_manager.is_triggered(switch_name):
-                    logger.info(
-                        "home: %s triggered after %d step(s) (%.1f mm)",
-                        switch_name, steps_taken, steps_taken * step_mm,
+                    # Check limit switch after the move is physically complete.
+                    # Pin LOW (grounded) = switch triggered = stop.
+                    if gpio_manager.is_triggered(switch_name):
+                        logger.info(
+                            "home: %s triggered after %d step(s) (%.1f mm)",
+                            switch_name, steps_taken, steps_taken * step_mm,
+                        )
+                        break
+
+                if not gpio_manager.is_triggered(switch_name):
+                    self._send_locked("G90")   # restore absolute before raising
+                    raise RuntimeError(
+                        f"Homing failed: {switch_name} not triggered after "
+                        f"{steps_taken} step(s) of {step_mm} mm on -X axis. "
+                        f"Check wiring or increase max_steps."
                     )
-                    break
 
-            # No residual motion remains — M400 was already issued per step.
-            self._send_locked("G90")   # restore absolute positioning
+            # Retract away from the switch so the pin is no longer grounded.
+            logger.info(
+                "home: backing off %.1f mm (+X) to release %s",
+                backoff_mm, switch_name,
+            )
+            self._send_locked(f"G1 X+{backoff_mm:g} F{homing_feed}")
+            self._send_locked("M400")
 
-            if not gpio_manager.is_triggered(switch_name):
-                raise RuntimeError(
-                    f"Homing failed: {switch_name} not triggered after "
-                    f"{steps_taken} step(s) of {step_mm} mm on +X axis. "
-                    f"Check wiring or increase max_steps."
+            switch_released = not gpio_manager.is_triggered(switch_name)
+            if not switch_released:
+                logger.warning(
+                    "home: %s still grounded after %.1f mm backoff",
+                    switch_name, backoff_mm,
                 )
+
+            self._send_locked("G90")   # restore absolute positioning
 
             return {
                 "method":            "limit_switch",
@@ -338,7 +354,9 @@ class Printer:
                 "reached_switch":    True,
                 "steps":             steps_taken,
                 "distance_mm":       round(steps_taken * step_mm, 3),
-                "already_at_switch": False,
+                "backoff_mm":        backoff_mm,
+                "switch_released":   switch_released,
+                "already_at_switch": already_at_switch,
             }
 
     def emergency_stop(self) -> None:
