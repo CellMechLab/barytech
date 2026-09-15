@@ -413,14 +413,27 @@ async def _dispatch(action: str, params: dict) -> dict:
     if action == "printer_status":
         pos  = await _run(_printer.get_position)
         temp = await _run(_printer.get_temperature)
-        log.debug("PRINTER_STATUS  pos=%s  hotend=%s  bed=%s",
-                  pos.as_dict(), temp.get("hotend_temp"), temp.get("bed_temp"))
+        # Include live limit-switch levels so pin state is visible in the
+        # same status stream the dashboard polls every ~2 s.
+        switches = gpio_manager.read_limit_switches()
+        gpio_ok = gpio_manager.gpio_available()
+        log.info(
+            "PRINTER_STATUS  pos=%s  hotend=%s  bed=%s  "
+            "gpio=%s  switches=%s",
+            pos.as_dict(),
+            temp.get("hotend_temp"),
+            temp.get("bed_temp"),
+            "ready" if gpio_ok else "OFF",
+            switches,
+        )
         return {
             "position":     pos.as_dict(),
             "temperatures": {
                 "hotend_temp": temp["hotend_temp"],
                 "bed_temp":    temp["bed_temp"],
             },
+            "gpio_available": gpio_ok,
+            "switches":       switches,
         }
 
     raise ValueError(f"Unknown action: '{action}'")
