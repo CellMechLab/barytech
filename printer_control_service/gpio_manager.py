@@ -10,9 +10,9 @@ Wiring convention:
         Pin LOW  (0) = switch closed (triggered)
 
 Pin assignment (BCM numbering) — edit to match your wiring:
-    X_MIN → GPIO 4
+    Z_MIN → GPIO 4
     Y_MIN → GPIO 27   (uncomment when wired)
-    Z_MIN → GPIO 22   (uncomment when wired)
+    X_MIN → GPIO 17  (uncomment when wired)
 
 A background monitor polls pins and logs whenever a switch is pressed
 or released so you can verify wiring without running a home cycle.
@@ -30,9 +30,9 @@ log = logging.getLogger("gpio")
 # ---------------------------------------------------------------------------
 
 LIMIT_SWITCH_PINS: dict[str, int] = {
-    "X_MIN": 4,
+    "Z_MIN": 4,
     # "Y_MIN": 27,
-    # "Z_MIN": 22,
+    # "X_MIN": 17,
 }
 
 # How often the background monitor samples pin state (seconds)

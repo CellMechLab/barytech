@@ -235,18 +235,17 @@ class Printer:
 
     def home(self, axes: Optional[list[str]] = None) -> dict:
         """
-        Home X axis by jogging in the -X direction, step_mm at a time, until
-        the GPIO limit switch (X_MIN, BCM pin 4) is triggered (pin pulled
-        LOW / grounded).
+        Home Z axis by jogging G1 Z-<step_mm> at a time until the GPIO
+        limit switch (Z_MIN, BCM pin 4) is triggered (pin pulled LOW).
 
         Does NOT send G28 — homing is done entirely via GPIO feedback.
 
         Sequence per step:
-            1. Send G1 X-<step_mm> F600  (relative jog toward home end)
+            1. Send G1 Z-<step_mm> F600  (relative jog toward home end)
             2. Send M400                 (block until motor physically stops)
-            3. Read GPIO — if X_MIN is LOW (triggered), stop immediately.
+            3. Read GPIO — if Z_MIN is LOW (triggered), stop immediately.
 
-        After the switch triggers, jog +backoff_mm in X so the pin is no
+        After the switch triggers, jog +backoff_mm in Z so the pin is no
         longer grounded (switch opens, pin HIGH).
 
         M400 is critical: Marlin's 'ok' for G1 only means the command was
@@ -254,29 +253,34 @@ class Printer:
         fills with several steps ahead, and the motor keeps running for
         multiple steps after GPIO triggers.
 
-        *axes* is accepted for API compatibility but only X is homed.
+        *axes* is accepted for API compatibility but only Z is homed.
 
         Returns a dict with homing result details.
         Raises RuntimeError if the switch is never triggered within max_steps.
         """
         import gpio_manager
 
-        switch_name  = "X_MIN"   # GPIO name defined in gpio_manager.LIMIT_SWITCH_PINS
-        step_mm      = 0.1        # jog distance per iteration (mm)
-        backoff_mm   = 1.0        # retract (+X) after trigger so switch opens
-        homing_feed  = 600        # slow feed rate for safe approach (mm/min)
-        max_steps    = 600        # safety cutoff (~300 mm max travel at 0.5 mm/step)
+        # GPIO name defined in gpio_manager.LIMIT_SWITCH_PINS (BCM pin 4)
+        switch_name  = "Z_MIN"
+        # Jog distance per iteration toward the switch (mm)
+        step_mm      = 0.5
+        # Retract (+Z) after trigger so the switch opens again
+        backoff_mm   = 1.0
+        # Slow feed rate for safe approach (mm/min)
+        homing_feed  = 600
+        # Safety cutoff (~300 mm max travel at 0.5 mm/step)
+        max_steps    = 600
 
         if axes:
             requested = [a.upper() for a in axes]
-            if "X" not in requested:
+            if "Z" not in requested:
                 logger.warning(
-                    "home: only X limit-switch homing is supported; ignoring axes=%s",
+                    "home: only Z limit-switch homing is supported; ignoring axes=%s",
                     requested,
                 )
 
         logger.info(
-            "home: limit-switch seek on +X  step=%.1f mm  feed=%d mm/min  switch=%s",
+            "home: limit-switch seek on -Z  step=%.1f mm  feed=%d mm/min  switch=%s",
             step_mm, homing_feed, switch_name,
         )
 
@@ -289,7 +293,7 @@ class Printer:
                     "Check RPi.GPIO wiring on the Pi."
                 )
 
-            # True when X is already seated on the switch before homing starts
+            # True when Z is already seated on the switch before homing starts
             already_at_switch = gpio_manager.is_triggered(switch_name)
             if already_at_switch:
                 logger.info(
@@ -303,8 +307,8 @@ class Printer:
             steps_taken = 0
             if not already_at_switch:
                 for _ in range(max_steps):
-                    # Jog one step toward the limit switch.
-                    self._send_locked(f"G1 X-{step_mm:g} F{homing_feed}")
+                    # Jog one step toward the Z limit switch (G1 Z-0.5).
+                    self._send_locked(f"G1 Z-{step_mm:g} F{homing_feed}")
 
                     # M400 blocks until the planner queue is drained and the motor
                     # has physically stopped.  Without this, Marlin's 'ok' for G1
@@ -327,16 +331,16 @@ class Printer:
                     self._send_locked("G90")   # restore absolute before raising
                     raise RuntimeError(
                         f"Homing failed: {switch_name} not triggered after "
-                        f"{steps_taken} step(s) of {step_mm} mm on -X axis. "
+                        f"{steps_taken} step(s) of {step_mm} mm on -Z axis. "
                         f"Check wiring or increase max_steps."
                     )
 
             # Retract away from the switch so the pin is no longer grounded.
             logger.info(
-                "home: backing off %.1f mm (+X) to release %s",
+                "home: backing off %.1f mm (+Z) to release %s",
                 backoff_mm, switch_name,
             )
-            self._send_locked(f"G1 X+{backoff_mm:g} F{homing_feed}")
+            self._send_locked(f"G1 Z+{backoff_mm:g} F{homing_feed}")
             self._send_locked("M400")
 
             switch_released = not gpio_manager.is_triggered(switch_name)

@@ -13,8 +13,8 @@ Movement limits enforced here (soft limits, before any G-code is sent):
     E : unlimited
 
 Homing (action "home"):
-    Does not send G28.  Jogs X toward X_MIN in small steps until the GPIO
-    limit switch on BCM pin 4 (gpio_manager) reads triggered (pin LOW).
+    Does not send G28.  Jogs Z with G1 Z-0.5 until the GPIO
+    limit switch Z_MIN on BCM pin 4 (gpio_manager) reads triggered (pin LOW).
 
 Z-axis inversion:
     This machine's Z motor is physically inverted.
@@ -333,14 +333,14 @@ async def _dispatch(action: str, params: dict) -> dict:
             "feed":           feed,
         }
 
-    # ── Home (X via GPIO limit switch — no G28) ───────────────────────────
+    # ── Home (Z via GPIO limit switch — no G28) ───────────────────────────
     if action == "home":
-        axes = params.get("axes")   # optional; only X is homed via X_MIN switch
+        axes = params.get("axes")   # optional; only Z is homed via Z_MIN switch
 
         switch_states = gpio_manager.read_limit_switches()
         log.info(
             "HOMING  method=limit_switch  axes=%s  switches=%s",
-            axes or ["X"], switch_states,
+            axes or ["Z"], switch_states,
         )
 
         try:
@@ -356,7 +356,7 @@ async def _dispatch(action: str, params: dict) -> dict:
         log.info("HOMING COMPLETE  %s", result)
         return {
             "homed": True,
-            "axes": ["X"],
+            "axes": ["Z"],
             "method": result.get("method", "limit_switch"),
             "steps": result.get("steps"),
             "switch": result.get("switch"),
