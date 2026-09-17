@@ -47,6 +47,13 @@ class PrinterConfig:
     feed_xy: int = 3000
     feed_z: int = 1000
     feed_e: int = 300
+    # If True, connect() tries `port` first, then each of candidate_ports
+    # in order, picking the first one that actually answers like Marlin.
+    # This is needed because the Pi enumerates the printer's USB-serial
+    # adapter as /dev/ttyACM0, ttyACM1, or ttyACM2 depending on what else
+    # was already plugged in / boot order — it's not stable across restarts.
+    auto_detect_port: bool = True
+    candidate_ports: tuple = ("/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2")
 
 
 @dataclass
@@ -87,7 +94,15 @@ class Printer:
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
-        """Open the serial port and initialise absolute positioning mode."""
+        """
+        Open the serial port and initialise absolute positioning mode.
+
+        If config.auto_detect_port is True (default), tries config.port
+        first, then each of config.candidate_ports in order, and connects
+        to the first one that actually answers like Marlin (via M115).
+        On success, config.port is updated to the port that worked, so
+        later log lines / status reporting reflect the real device.
+        """
         with self._lock:
             if self._ser and self._ser.is_open:
                 logger.info(
@@ -96,24 +111,73 @@ class Printer:
                 )
                 return  # already connected
 
-            logger.info(
-                "Opening serial port %s @ %d baud (timeout=%.1fs)",
-                self.config.port, self.config.baud_rate, self.config.timeout,
+            ports_to_try = [self.config.port]
+            if self.config.auto_detect_port:
+                ports_to_try += [
+                    p for p in self.config.candidate_ports if p not in ports_to_try
+                ]
+
+            last_error: Optional[Exception] = None
+            for port in ports_to_try:
+                logger.info(
+                    "Probing serial port %s @ %d baud (timeout=%.1fs)",
+                    port, self.config.baud_rate, self.config.timeout,
+                )
+                try:
+                    ser = serial.Serial(
+                        port,
+                        self.config.baud_rate,
+                        timeout=self.config.timeout,
+                    )
+                except (serial.SerialException, OSError) as exc:
+                    logger.warning("Could not open %s: %s", port, exc)
+                    last_error = exc
+                    continue
+
+                logger.debug("Waiting 2 s for Marlin greeting banner on %s…", port)
+                time.sleep(2)                   # wait for Marlin greeting banner
+                ser.reset_input_buffer()
+
+                if self._probe_marlin(ser):
+                    self._ser = ser
+                    self.config.port = port      # remember which one actually worked
+                    self._send_locked("G90")     # absolute mode
+                    logger.info(
+                        "Serial port open and printer in absolute mode (%s)",
+                        port,
+                    )
+                    return
+
+                logger.warning(
+                    "%s opened but did not answer like Marlin — trying next candidate",
+                    port,
+                )
+                ser.close()
+
+            raise PrinterNotConnectedError(
+                f"No printer found on any of {ports_to_try}. "
+                f"Last error: {last_error}"
             )
-            self._ser = serial.Serial(
-                self.config.port,
-                self.config.baud_rate,
-                timeout=self.config.timeout,
-            )
-            logger.debug("Waiting 2 s for Marlin greeting banner…")
-            time.sleep(2)                   # wait for Marlin greeting banner
-            self._ser.reset_input_buffer()
-            logger.debug("Input buffer flushed after greeting")
-            self._send_locked("G90")        # absolute mode
-            logger.info(
-                "Serial port open and printer in absolute mode (%s)",
-                self.config.port,
-            )
+
+    def _probe_marlin(self, ser: "serial.Serial") -> bool:
+        """
+        Send M115 on an already-open port and check for a Marlin-style
+        firmware response, to confirm this is actually the printer and
+        not some other USB-serial device enumerated as /dev/ttyACMx.
+        """
+        try:
+            ser.reset_input_buffer()
+            ser.write(b"M115\n")
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                raw = ser.readline().decode(errors="ignore").strip()
+                if raw:
+                    logger.debug("PROBE %s: %s", ser.port, raw)
+                if "FIRMWARE_NAME" in raw or raw.startswith("ok"):
+                    return True
+        except (serial.SerialException, OSError) as exc:
+            logger.debug("PROBE %s failed: %s", ser.port, exc)
+        return False
 
     def disconnect(self) -> None:
         """Close the serial port gracefully."""
