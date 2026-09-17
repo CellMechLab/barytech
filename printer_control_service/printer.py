@@ -142,8 +142,18 @@ class Printer:
                     self._ser = ser
                     self.config.port = port      # remember which one actually worked
                     self._send_locked("G90")     # absolute mode
+                    # Firmware soft-endstops (X/Y/Z _MIN_POS.._MAX_POS) are
+                    # fixed at compile time and track their own internal
+                    # reference, which G92 does NOT rebase — it only relabels
+                    # what M114/our app sees. Left enabled, the firmware (and
+                    # the printer's touchscreen) will keep clamping motion
+                    # against that untouched reference instead of our
+                    # calibrated one. Disable it here and enforce bounds
+                    # ourselves in main.py's _LIMITS instead.
+                    self._send_locked("M211 S0")
                     logger.info(
-                        "Serial port open and printer in absolute mode (%s)",
+                        "Serial port open, absolute mode, firmware soft-endstops "
+                        "disabled (M211 S0) — bounds enforced in application layer (%s)",
                         port,
                     )
                     return
