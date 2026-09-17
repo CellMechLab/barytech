@@ -275,7 +275,7 @@ class Printer:
                 "switch": "Y_MIN",
                 "seek_sign": +1,   # G1 Y+0.5 toward switch
                 "step_mm": 0.5,
-                "backoff_mm": 1.0,
+                "backoff_mm": 36.0,
             },
             "Z": {
                 "switch": "Z_MIN",
