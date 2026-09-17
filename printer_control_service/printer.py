@@ -239,16 +239,25 @@ class Printer:
         the pin is pulled LOW (triggered).
 
         Does NOT send G28 — homing is done entirely via GPIO feedback.
+        The moment a switch triggers, a G92 is sent to assign that physical
+        point its known coordinate (home_value in axis_home_cfg), so the
+        firmware's internal position is calibrated to where the switch
+        actually is — X and Y switches sit at the right/back corner, which
+        is this printer's compiled X_MAX_POS/Y_MAX_POS corner, not 0.
+        Without this, Marlin's reported position after homing is an
+        uncalibrated artifact of its fixed compiled soft-endstop window,
+        not a real physical position.
 
         Default order (always X → Y → Z when axes is None / full home):
-            X_MIN (BCM 27)  seek G1 X+0.5, backoff X-
-            Y_MIN (BCM 17)  seek G1 Y+0.5, backoff Y-
-            Z_MIN (BCM 4)   seek G1 Z-0.5, backoff Z+
+            X_MIN (BCM 27)  seek G1 X+0.5, backoff X-, calibrate X=252
+            Y_MIN (BCM 17)  seek G1 Y+0.5, backoff Y-, calibrate Y=185
+            Z_MIN (BCM 4)   seek G1 Z-0.5, backoff Z+, calibrate Z=0
 
         Per-axis sequence:
             1. Send G1 <axis><dir><step_mm> F600
-            2. Send M400 (block until motor physically stops)
-            3. Read GPIO — if switch is LOW (triggered), stop immediately
+            2. Send M400 (block until motor physically stopped)
+            3. Read GPIO — if switch is LOW (triggered), send G92 to
+               calibrate this axis's coordinate, then stop seeking
             4. Back off opposite direction so the switch opens again
 
         M400 is critical: Marlin's 'ok' for G1 only means the command was
@@ -264,24 +273,38 @@ class Printer:
 
         # Per-axis seek config: switch name, seek sign (+1 / -1), step, backoff
         # Seek sign is the firmware G1 direction toward the limit switch.
+        # home_value = the coordinate the firmware should assign to this axis
+        # the instant its switch triggers. Because X and Y are homed by
+        # jogging in the *positive* direction (seek_sign +1), the switches
+        # sit at the physical corner the firmware's compiled config treats
+        # as X_MAX_POS / Y_MAX_POS (not 0) — this printer's switches are
+        # mounted right/back instead of the stock left/front. Z still homes
+        # toward its physical minimum (nozzle down to the bed), so its
+        # home_value stays 0.0.
+        X_MAX_POS = 252.0
+        Y_MAX_POS = 185.0
+
         axis_home_cfg: dict[str, dict] = {
             "X": {
                 "switch": "X_MIN",
                 "seek_sign": +1,   # G1 X+0.5 toward switch
                 "step_mm": 0.5,
                 "backoff_mm": 1.0,
+                "home_value": X_MAX_POS,
             },
             "Y": {
                 "switch": "Y_MIN",
                 "seek_sign": +1,   # G1 Y+0.5 toward switch
                 "step_mm": 0.5,
                 "backoff_mm": 36.0,
+                "home_value": Y_MAX_POS,
             },
             "Z": {
                 "switch": "Z_MIN",
                 "seek_sign": -1,   # G1 Z-0.5 toward switch
                 "step_mm": 0.5,
                 "backoff_mm": 1.0,
+                "home_value": 0.0,
             },
         }
         # Fixed home order regardless of caller request list
@@ -332,6 +355,7 @@ class Printer:
                     step_mm = float(cfg["step_mm"])
                     backoff_mm = float(cfg["backoff_mm"])
                     seek_sign = int(cfg["seek_sign"])
+                    home_value = float(cfg["home_value"])
                     # Opposite of seek — used to release the switch after contact
                     backoff_sign = -seek_sign
                     seek_delta = seek_sign * step_mm
@@ -349,6 +373,11 @@ class Printer:
                             "home: %s already triggered — will back off %+.1f mm",
                             switch_name, backoff_delta,
                         )
+                        self._send_locked(f"G92 {axis}{home_value:g}")
+                        logger.info(
+                            "home: %s calibrated to %s=%g at switch trigger",
+                            axis, axis, home_value,
+                        )
 
                     steps_taken = 0
                     if not already_at_switch:
@@ -365,6 +394,11 @@ class Printer:
                                 logger.info(
                                     "home: %s triggered after %d step(s) (%.1f mm)",
                                     switch_name, steps_taken, steps_taken * step_mm,
+                                )
+                                self._send_locked(f"G92 {axis}{home_value:g}")
+                                logger.info(
+                                    "home: %s calibrated to %s=%g at switch trigger",
+                                    axis, axis, home_value,
                                 )
                                 break
 
@@ -402,6 +436,7 @@ class Printer:
                         "backoff_mm":        backoff_mm,
                         "switch_released":   switch_released,
                         "already_at_switch": already_at_switch,
+                        "calibrated_to":     home_value,
                     }
             finally:
                 # Always restore absolute mode even if an axis fails mid-sequence
