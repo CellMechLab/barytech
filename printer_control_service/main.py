@@ -72,7 +72,7 @@ async def _run(fn, *args):
 
 _LIMITS: dict[str, tuple[Optional[float], Optional[float]]] = {
     "X": (10.0,   245.0),
-    "Y": (-19.0,  -239.0),
+    "Y": (-239.0, -19.0),
     "Z": (10.0,   265.0),
     "E": (None,   None),     # no limit on extruder
 }
