@@ -71,10 +71,13 @@ async def _run(fn, *args):
 # ---------------------------------------------------------------------------
 
 _LIMITS: dict[str, tuple[Optional[float], Optional[float]]] = {
-    "X": (10.0,   245.0),
-    "Y": (-239.0, -19.0),
-    "Z": (10.0,   265.0),
-    "E": (None,   None),     # no limit on extruder
+    "X": (0.0,  245.0),
+    "Y": (0.0,  175.0),   # rebased after G92 homing calibration: Y switch
+                           # triggers at Y_MAX_POS=185 (back), opposite edge
+                           # is Y=0 (front) — old (-239, -19) was against the
+                           # pre-calibration, uncalibrated coordinate frame.
+    "Z": (0.0,  265.0),
+    "E": (None,  None),     # no limit on extruder
 }
 
 
