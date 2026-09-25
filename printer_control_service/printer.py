@@ -47,13 +47,6 @@ class PrinterConfig:
     feed_xy: int = 3000
     feed_z: int = 1000
     feed_e: int = 300
-    # If True, connect() tries `port` first, then each of candidate_ports
-    # in order, picking the first one that actually answers like Marlin.
-    # This is needed because the Pi enumerates the printer's USB-serial
-    # adapter as /dev/ttyACM0, ttyACM1, or ttyACM2 depending on what else
-    # was already plugged in / boot order — it's not stable across restarts.
-    auto_detect_port: bool = True
-    candidate_ports: tuple = ("/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2")
 
 
 @dataclass
@@ -94,15 +87,7 @@ class Printer:
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
-        """
-        Open the serial port and initialise absolute positioning mode.
-
-        If config.auto_detect_port is True (default), tries config.port
-        first, then each of config.candidate_ports in order, and connects
-        to the first one that actually answers like Marlin (via M115).
-        On success, config.port is updated to the port that worked, so
-        later log lines / status reporting reflect the real device.
-        """
+        """Open the serial port and initialise absolute positioning mode."""
         with self._lock:
             if self._ser and self._ser.is_open:
                 logger.info(
@@ -111,83 +96,24 @@ class Printer:
                 )
                 return  # already connected
 
-            ports_to_try = [self.config.port]
-            if self.config.auto_detect_port:
-                ports_to_try += [
-                    p for p in self.config.candidate_ports if p not in ports_to_try
-                ]
-
-            last_error: Optional[Exception] = None
-            for port in ports_to_try:
-                logger.info(
-                    "Probing serial port %s @ %d baud (timeout=%.1fs)",
-                    port, self.config.baud_rate, self.config.timeout,
-                )
-                try:
-                    ser = serial.Serial(
-                        port,
-                        self.config.baud_rate,
-                        timeout=self.config.timeout,
-                    )
-                except (serial.SerialException, OSError) as exc:
-                    logger.warning("Could not open %s: %s", port, exc)
-                    last_error = exc
-                    continue
-
-                logger.debug("Waiting 2 s for Marlin greeting banner on %s…", port)
-                time.sleep(2)                   # wait for Marlin greeting banner
-                ser.reset_input_buffer()
-
-                if self._probe_marlin(ser):
-                    self._ser = ser
-                    self.config.port = port      # remember which one actually worked
-                    self._send_locked("G90")     # absolute mode
-                    # Firmware soft-endstops (X/Y/Z _MIN_POS.._MAX_POS) are
-                    # fixed at compile time and track their own internal
-                    # reference, which G92 does NOT rebase — it only relabels
-                    # what M114/our app sees. Left enabled, the firmware (and
-                    # the printer's touchscreen) will keep clamping motion
-                    # against that untouched reference instead of our
-                    # calibrated one. Disable it here and enforce bounds
-                    # ourselves in main.py's _LIMITS instead.
-                    self._send_locked("M211 S0")
-                    logger.info(
-                        "Serial port open, absolute mode, firmware soft-endstops "
-                        "disabled (M211 S0) — bounds enforced in application layer (%s)",
-                        port,
-                    )
-                    return
-
-                logger.warning(
-                    "%s opened but did not answer like Marlin — trying next candidate",
-                    port,
-                )
-                ser.close()
-
-            raise PrinterNotConnectedError(
-                f"No printer found on any of {ports_to_try}. "
-                f"Last error: {last_error}"
+            logger.info(
+                "Opening serial port %s @ %d baud (timeout=%.1fs)",
+                self.config.port, self.config.baud_rate, self.config.timeout,
             )
-
-    def _probe_marlin(self, ser: "serial.Serial") -> bool:
-        """
-        Send M115 on an already-open port and check for a Marlin-style
-        firmware response, to confirm this is actually the printer and
-        not some other USB-serial device enumerated as /dev/ttyACMx.
-        """
-        try:
-            ser.reset_input_buffer()
-            ser.write(b"M115\n")
-            deadline = time.time() + 3.0
-            while time.time() < deadline:
-                raw = ser.readline().decode(errors="ignore").strip()
-                if raw:
-                    logger.debug("PROBE %s: %s", ser.port, raw)
-                if "FIRMWARE_NAME" in raw or raw.startswith("ok"):
-                    return True
-        except (serial.SerialException, OSError) as exc:
-            logger.debug("PROBE %s failed: %s", ser.port, exc)
-        return False
+            self._ser = serial.Serial(
+                self.config.port,
+                self.config.baud_rate,
+                timeout=self.config.timeout,
+            )
+            logger.debug("Waiting 2 s for Marlin greeting banner…")
+            time.sleep(2)                   # wait for Marlin greeting banner
+            self._ser.reset_input_buffer()
+            logger.debug("Input buffer flushed after greeting")
+            self._send_locked("G90")        # absolute mode
+            logger.info(
+                "Serial port open and printer in absolute mode (%s)",
+                self.config.port,
+            )
 
     def disconnect(self) -> None:
         """Close the serial port gracefully."""
@@ -313,25 +239,18 @@ class Printer:
         the pin is pulled LOW (triggered).
 
         Does NOT send G28 — homing is done entirely via GPIO feedback.
-        The moment a switch triggers, a G92 is sent to assign that physical
-        point its known coordinate (home_value in axis_home_cfg), so the
-        firmware's internal position is calibrated to where the switch
-        actually is — X and Y switches sit at the right/back corner, which
-        is this printer's compiled X_MAX_POS/Y_MAX_POS corner, not 0.
-        Without this, Marlin's reported position after homing is an
-        uncalibrated artifact of its fixed compiled soft-endstop window,
-        not a real physical position.
 
         Default order (always X → Y → Z when axes is None / full home):
-            X_MIN (BCM 27)  seek G1 X+0.5, backoff X-, calibrate X=252
-            Y_MIN (BCM 17)  seek G1 Y+0.5, backoff Y-, calibrate Y=185
-            Z_MIN (BCM 4)   seek G1 Z-0.5, backoff Z+, calibrate Z=0
+            X_MIN (BCM 27)  seek G1 X+0.5, backoff X-
+            Y_MIN (BCM 17)  seek G1 Y+0.5, backoff Y-
+            Z_MIN (BCM 4)   seek G1 Z-0.5, backoff Z+
 
         Per-axis sequence:
-            1. Send G1 <axis><dir><step_mm> F600
-            2. Send M400 (block until motor physically stopped)
-            3. Read GPIO — if switch is LOW (triggered), send G92 to
-               calibrate this axis's coordinate, then stop seeking
+            0. If already on the switch, back off until it releases (so X
+               always moves first even when seated on X_MIN)
+            1. Send G1 <axis><dir><step_mm> F600 toward the switch
+            2. Send M400 (block until motor physically stops)
+            3. Read GPIO — if switch is LOW (triggered), stop immediately
             4. Back off opposite direction so the switch opens again
 
         M400 is critical: Marlin's 'ok' for G1 only means the command was
@@ -347,38 +266,24 @@ class Printer:
 
         # Per-axis seek config: switch name, seek sign (+1 / -1), step, backoff
         # Seek sign is the firmware G1 direction toward the limit switch.
-        # home_value = the coordinate the firmware should assign to this axis
-        # the instant its switch triggers. Because X and Y are homed by
-        # jogging in the *positive* direction (seek_sign +1), the switches
-        # sit at the physical corner the firmware's compiled config treats
-        # as X_MAX_POS / Y_MAX_POS (not 0) — this printer's switches are
-        # mounted right/back instead of the stock left/front. Z still homes
-        # toward its physical minimum (nozzle down to the bed), so its
-        # home_value stays 0.0.
-        X_MAX_POS = 252.0
-        Y_MAX_POS = 185.0
-
         axis_home_cfg: dict[str, dict] = {
             "X": {
                 "switch": "X_MIN",
                 "seek_sign": +1,   # G1 X+0.5 toward switch
                 "step_mm": 0.5,
                 "backoff_mm": 1.0,
-                "home_value": X_MAX_POS,
             },
             "Y": {
                 "switch": "Y_MIN",
                 "seek_sign": +1,   # G1 Y+0.5 toward switch
                 "step_mm": 0.5,
-                "backoff_mm": 36.0,
-                "home_value": Y_MAX_POS,
+                "backoff_mm": 1.0,
             },
             "Z": {
                 "switch": "Z_MIN",
                 "seek_sign": -1,   # G1 Z-0.5 toward switch
                 "step_mm": 0.5,
                 "backoff_mm": 1.0,
-                "home_value": 0.0,
             },
         }
         # Fixed home order regardless of caller request list
@@ -387,6 +292,8 @@ class Printer:
         homing_feed = 600
         # Safety cutoff (~300 mm max travel at 0.5 mm/step)
         max_steps = 600
+        # Max steps while backing off a switch that was already pressed
+        max_backoff_steps = 40
 
         if axes:
             requested = {a.upper() for a in axes}
@@ -429,64 +336,75 @@ class Printer:
                     step_mm = float(cfg["step_mm"])
                     backoff_mm = float(cfg["backoff_mm"])
                     seek_sign = int(cfg["seek_sign"])
-                    home_value = float(cfg["home_value"])
-                    # Opposite of seek — used to release the switch after contact
+                    # Opposite of seek — used to leave the switch
                     backoff_sign = -seek_sign
                     seek_delta = seek_sign * step_mm
                     backoff_delta = backoff_sign * backoff_mm
 
                     logger.info(
-                        "home: seeking %s  switch=%s  step=%+.1f mm",
+                        "========== HOMING AXIS %s  switch=%s  seek=%+.1f ==========",
                         axis, switch_name, seek_delta,
                     )
 
                     # True when already seated on the switch before this axis starts
                     already_at_switch = gpio_manager.is_triggered(switch_name)
+
+                    # If already on the switch, move away until it releases so the
+                    # following seek is a full approach (X is never "invisible").
                     if already_at_switch:
                         logger.info(
-                            "home: %s already triggered — will back off %+.1f mm",
-                            switch_name, backoff_delta,
+                            "home: %s already TRIGGERED — backing off until released "
+                            "before seek",
+                            switch_name,
                         )
-                        self._send_locked(f"G92 {axis}{home_value:g}")
-                        logger.info(
-                            "home: %s calibrated to %s=%g at switch trigger",
-                            axis, axis, home_value,
-                        )
-
-                    steps_taken = 0
-                    if not already_at_switch:
-                        for _ in range(max_steps):
-                            # Jog one step toward the limit switch.
+                        released = False
+                        for _ in range(max_backoff_steps):
                             self._send_locked(
-                                f"G1 {axis}{seek_delta:+g} F{homing_feed}"
+                                f"G1 {axis}{backoff_delta:+g} F{homing_feed}"
                             )
-                            # M400 waits until the motor has physically stopped.
                             self._send_locked("M400")
-                            steps_taken += 1
-
-                            if gpio_manager.is_triggered(switch_name):
+                            if not gpio_manager.is_triggered(switch_name):
+                                released = True
                                 logger.info(
-                                    "home: %s triggered after %d step(s) (%.1f mm)",
-                                    switch_name, steps_taken, steps_taken * step_mm,
-                                )
-                                self._send_locked(f"G92 {axis}{home_value:g}")
-                                logger.info(
-                                    "home: %s calibrated to %s=%g at switch trigger",
-                                    axis, axis, home_value,
+                                    "home: %s released — starting seek on %s",
+                                    switch_name, axis,
                                 )
                                 break
-
-                        if not gpio_manager.is_triggered(switch_name):
+                        if not released:
                             raise RuntimeError(
-                                f"Homing failed: {switch_name} not triggered after "
-                                f"{steps_taken} step(s) of {step_mm} mm on "
-                                f"{axis}{'+' if seek_sign > 0 else '-'} axis. "
-                                f"Check wiring or increase max_steps."
+                                f"Homing failed: {switch_name} stayed triggered after "
+                                f"{max_backoff_steps} backoff step(s) on {axis}. "
+                                f"Check wiring / stuck switch."
                             )
 
-                    # Retract away from the switch so the pin is no longer grounded.
+                    steps_taken = 0
+                    for _ in range(max_steps):
+                        # Jog one step toward the limit switch.
+                        self._send_locked(
+                            f"G1 {axis}{seek_delta:+g} F{homing_feed}"
+                        )
+                        # M400 waits until the motor has physically stopped.
+                        self._send_locked("M400")
+                        steps_taken += 1
+
+                        if gpio_manager.is_triggered(switch_name):
+                            logger.info(
+                                "home: %s triggered after %d step(s) (%.1f mm)",
+                                switch_name, steps_taken, steps_taken * step_mm,
+                            )
+                            break
+
+                    if not gpio_manager.is_triggered(switch_name):
+                        raise RuntimeError(
+                            f"Homing failed: {switch_name} not triggered after "
+                            f"{steps_taken} step(s) of {step_mm} mm on "
+                            f"{axis}{'+' if seek_sign > 0 else '-'} axis. "
+                            f"Check wiring or increase max_steps."
+                        )
+
+                    # Final retract so the pin is no longer grounded.
                     logger.info(
-                        "home: backing off %+.1f mm on %s to release %s",
+                        "home: final backoff %+.1f mm on %s to release %s",
                         backoff_delta, axis, switch_name,
                     )
                     self._send_locked(
@@ -501,6 +419,8 @@ class Printer:
                             switch_name, backoff_mm,
                         )
 
+                    logger.info("========== AXIS %s DONE ==========", axis)
+
                     results[axis] = {
                         "switch":            switch_name,
                         "reached_switch":    True,
@@ -510,7 +430,6 @@ class Printer:
                         "backoff_mm":        backoff_mm,
                         "switch_released":   switch_released,
                         "already_at_switch": already_at_switch,
-                        "calibrated_to":     home_value,
                     }
             finally:
                 # Always restore absolute mode even if an axis fails mid-sequence

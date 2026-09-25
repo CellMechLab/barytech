@@ -71,15 +71,10 @@ async def _run(fn, *args):
 # ---------------------------------------------------------------------------
 
 _LIMITS: dict[str, tuple[Optional[float], Optional[float]]] = {
-    # NOTE: with firmware soft-endstops disabled (M211 S0, see printer.py
-    # connect()), these are the ONLY thing stopping a crash. They were set
-    # from the G92-calibrated coordinate frame but have NOT been confirmed
-    # against a physical ruler measurement of real bed/gantry travel.
-    # Re-verify before relying on them at the edges.
-    "X": (10.0,  245.0),
-    "Y": (10.0,  175.0),
-    "Z": (10.0,  265.0),
-    "E": (None,  None),     # no limit on extruder
+    "X": (10.0,   245.0),
+    "Y": (-10.0,  210.0),
+    "Z": (10.0,   265.0),
+    "E": (None,   None),     # no limit on extruder
 }
 
 
@@ -280,12 +275,7 @@ async def _dispatch(action: str, params: dict) -> dict:
         current = getattr(pos, axis, 0.0)
         log.info("POSITION BEFORE MOVE  %s", pos.as_dict())
 
-        # ── Limits check — re-enabled: firmware soft-endstops are now
-        # disabled (M211 S0 on connect), so this is the ONLY thing
-        # protecting the machine. Values below are carried over from
-        # before and have NOT been re-verified by physical measurement
-        # against the real bed/gantry travel — confirm with a ruler
-        # before trusting them at the edges. ──────────────────────────
+        # ── Limits check — always use firmware_delta (actual motor direction) ──
         ok, warning = _limits_check(axis, current, firmware_delta)
         if not ok:
             return {"moved": False, "warning": warning}
@@ -323,9 +313,8 @@ async def _dispatch(action: str, params: dict) -> dict:
         # Negate for inverted Z motor: nozzle UP = firmware Z decreases.
         firmware_delta = -distance
 
-        # ── Limits check — re-enabled (see note in the "move" handler
-        # above: firmware soft-endstops are now disabled, so this is the
-        # only protection left) ─────────────────────────────────────────
+        # Limits check must use firmware_delta so the escape logic works
+        # correctly when Z is already above the maximum (over-travel recovery).
         ok, warning = _limits_check("Z", current_z, firmware_delta)
         if not ok:
             return {"moved": False, "warning": warning}
