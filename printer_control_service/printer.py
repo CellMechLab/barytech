@@ -40,7 +40,7 @@ class PrinterTimeoutError(RuntimeError):
 
 @dataclass
 class PrinterConfig:
-    port: str = "/dev/ttyACM1"
+    port: str = "/dev/ttyACM0"
     baud_rate: int = 230400
     timeout: float = 5.0
     # Feed rates (mm/min)
