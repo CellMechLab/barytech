@@ -327,8 +327,8 @@ class Printer:
         Does NOT send G28 — homing is done entirely via GPIO feedback.
 
         Default order (always X → Y → Z when axes is None / full home):
-            X_MIN (BCM 27)  seek G1 X+0.5, backoff X-
-            Y_MIN (BCM 17)  seek G1 Y+0.5, backoff Y-
+            X_MIN (BCM 27)  seek G1 X-0.5, backoff X+
+            Y_MIN (BCM 17)  seek G1 Y-0.5, backoff Y+
             Z_MIN (BCM 4)   seek G1 Z-0.5, backoff Z+
 
         Per-axis sequence:
@@ -355,13 +355,13 @@ class Printer:
         axis_home_cfg: dict[str, dict] = {
             "X": {
                 "switch": "X_MIN",
-                "seek_sign": +1,   # G1 X+0.5 toward switch
+                "seek_sign": -1,   # G1 X-0.5 toward switch (front-left corner)
                 "step_mm": 0.5,
                 "backoff_mm": 1.0,
             },
             "Y": {
                 "switch": "Y_MIN",
-                "seek_sign": +1,   # G1 Y+0.5 toward switch
+                "seek_sign": -1,   # G1 Y-0.5 toward switch (front-left corner)
                 "step_mm": 0.5,
                 "backoff_mm": 1.0,
             },
