@@ -40,7 +40,15 @@ class PrinterTimeoutError(RuntimeError):
 
 @dataclass
 class PrinterConfig:
+    # Preferred port. connect() tries this first, then anything in
+    # fallback_ports that isn't already this one — the Pi reassigns
+    # /dev/ttyACM* on reboot/replug, so a fixed port is unreliable.
     port: str = "/dev/ttyACM2"
+    fallback_ports: tuple[str, ...] = (
+        "/dev/ttyACM0",
+        "/dev/ttyACM1",
+        "/dev/ttyACM2",
+    )
     baud_rate: int = 230400
     timeout: float = 5.0
     # Feed rates (mm/min)
@@ -87,7 +95,17 @@ class Printer:
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
-        """Open the serial port and initialise absolute positioning mode."""
+        """
+        Open the serial port and initialise absolute positioning mode.
+
+        Tries config.port first, then each entry in config.fallback_ports.
+        A port only counts as "the printer" if it answers M115 with a
+        FIRMWARE_NAME line — otherwise some other ACM device (or a port
+        that opens but never replies) would be accepted silently.
+
+        The port that actually worked is written back to config.port so
+        later reconnects start with the one most likely to succeed.
+        """
         with self._lock:
             if self._ser and self._ser.is_open:
                 logger.info(
@@ -96,24 +114,92 @@ class Printer:
                 )
                 return  # already connected
 
+            # config.port first, then the fallbacks, without duplicates
+            candidates: list[str] = [self.config.port]
+            for p in self.config.fallback_ports:
+                if p not in candidates:
+                    candidates.append(p)
+
             logger.info(
-                "Opening serial port %s @ %d baud (timeout=%.1fs)",
-                self.config.port, self.config.baud_rate, self.config.timeout,
+                "Scanning for printer on %s @ %d baud",
+                ", ".join(candidates), self.config.baud_rate,
             )
-            self._ser = serial.Serial(
-                self.config.port,
-                self.config.baud_rate,
-                timeout=self.config.timeout,
+
+            errors: list[str] = []
+            for port in candidates:
+                ser = None
+                try:
+                    logger.info("Trying %s …", port)
+                    ser = serial.Serial(
+                        port,
+                        self.config.baud_rate,
+                        timeout=self.config.timeout,
+                    )
+                    logger.debug("Waiting 2 s for Marlin greeting banner…")
+                    time.sleep(2)           # wait for Marlin greeting banner
+                    ser.reset_input_buffer()
+
+                    if not self._probe_marlin(ser):
+                        logger.info("  %s opened but did not identify as Marlin", port)
+                        errors.append(f"{port}: no M115 response")
+                        ser.close()
+                        continue
+
+                    # Accepted — keep this handle and finish initialisation
+                    self._ser = ser
+                    self.config.port = port
+                    self._send_locked("G90")        # absolute mode
+                    logger.info(
+                        "Serial port open and printer in absolute mode (%s)",
+                        port,
+                    )
+                    return
+
+                except (serial.SerialException, OSError) as exc:
+                    # Port missing, busy, or permission denied — try the next
+                    logger.info("  %s unavailable: %s", port, exc)
+                    errors.append(f"{port}: {exc}")
+                    if ser is not None:
+                        try:
+                            ser.close()
+                        except Exception:
+                            pass
+
+            self._ser = None
+            raise PrinterNotConnectedError(
+                "No printer found on any candidate port. Tried:\n  "
+                + "\n  ".join(errors)
             )
-            logger.debug("Waiting 2 s for Marlin greeting banner…")
-            time.sleep(2)                   # wait for Marlin greeting banner
-            self._ser.reset_input_buffer()
-            logger.debug("Input buffer flushed after greeting")
-            self._send_locked("G90")        # absolute mode
-            logger.info(
-                "Serial port open and printer in absolute mode (%s)",
-                self.config.port,
-            )
+
+    def _probe_marlin(self, ser: serial.Serial) -> bool:
+        """
+        Send M115 on *ser* and return True if it answers like Marlin.
+
+        Accepts either a FIRMWARE_NAME line or a plain 'ok', since some
+        forks answer tersely. Does not use _send_locked — that requires
+        self._ser to already be assigned, which is exactly what we're
+        still deciding here.
+        """
+        try:
+            ser.reset_input_buffer()
+            ser.write(b"M115\n")
+            logger.debug("TX  M115  (probe on %s)", ser.port)
+
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                raw = ser.readline().decode(errors="ignore").strip()
+                if not raw:
+                    continue
+                logger.debug("RX  %s", raw)
+                if "FIRMWARE_NAME" in raw:
+                    logger.info("  identified: %s", raw[:80])
+                    return True
+                if raw.startswith("ok"):
+                    return True
+            return False
+        except Exception as exc:
+            logger.debug("probe failed on %s: %s", ser.port, exc)
+            return False
 
     def disconnect(self) -> None:
         """Close the serial port gracefully."""
