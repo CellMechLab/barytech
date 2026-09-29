@@ -356,32 +356,13 @@ async def _dispatch(action: str, params: dict) -> dict:
             }
 
         log.info("HOMING COMPLETE  %s", result)
-        # home() no longer raises when a single axis fails — it reports
-        # per-axis outcomes instead, so "no exception" does NOT mean success.
-        # Take the verdict from the result, never hardcode it, or the UI will
-        # show "homed" while axes sit unreferenced.
-        homed = bool(result.get("homed", False))
-        failed = result.get("failed", [])
-        response = {
-            "homed": homed,
-            "failed": failed,
+        return {
+            "homed": True,
             "axes": result.get("axes", ["X", "Y", "Z"]),
             "method": result.get("method", "limit_switch"),
             "results": result.get("results"),
             "switches": gpio_manager.read_limit_switches(),
         }
-        if failed:
-            per_axis = result.get("results", {}) or {}
-            reasons = [
-                per_axis.get(a, {}).get("error", "unknown")
-                for a in failed
-            ]
-            response["warning"] = (
-                f"Homing incomplete — {', '.join(failed)} not referenced. "
-                + " | ".join(reasons)
-            )
-            log.warning("HOME INCOMPLETE  failed=%s", failed)
-        return response
 
     # ── Sensors ──────────────────────────────────────────────────────────
 

@@ -34,38 +34,19 @@ class PrinterTimeoutError(RuntimeError):
     """Raised when the printer does not reply 'ok' within the deadline."""
 
 
-class _SeekStalled(Exception):
-    """
-    Internal: a homing seek stopped producing motion.
-
-    Signals that the firmware is discarding the moves — the axis has run out
-    of travel window in the seek direction — rather than that the switch or
-    its wiring is faulty. Carries the millimetres commanded before the stall.
-    """
-    def __init__(self, travelled_mm: float):
-        super().__init__(f"seek stalled after {travelled_mm:.1f} mm commanded")
-        self.travelled_mm = travelled_mm
-
-
 # ---------------------------------------------------------------------------
 # Data containers
 # ---------------------------------------------------------------------------
 
 @dataclass
 class PrinterConfig:
-    # Preferred port; connect() falls back through the others because the
-    # Pi renumbers /dev/ttyACM* on reboot or replug.
-    port: str = "/dev/ttyACM2"
-    fallback_ports: tuple[str, ...] = ("/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2")
+    port: str = "/dev/ttyACM0"
     baud_rate: int = 230400
     timeout: float = 5.0
     # Feed rates (mm/min)
     feed_xy: int = 3000
     feed_z: int = 1000
     feed_e: int = 300
-    # M92 on this machine reports X100 Y100 — needed to convert the raw
-    # CoreXY A/B stepper counts in M114 back into real millimetres.
-    steps_per_mm_xy: float = 100.0
 
 
 @dataclass
@@ -106,18 +87,7 @@ class Printer:
     # ------------------------------------------------------------------
 
     def connect(self) -> None:
-        """
-        Open the serial port and initialise absolute positioning mode.
-
-        Tries config.port first, then config.fallback_ports. A port only
-        counts as the printer if it answers M115 like Marlin, so another
-        ACM device is not silently adopted.
-
-        NOTE: no M211 S0 here. On Buddy 6.4.0 the travel clamp that bites
-        us is position_is_reachable(), which tests the raw compile-time
-        X/Y_MIN_POS..MAX_POS macros and is NOT controlled by M211 — so
-        disabling soft endstops changes nothing. See home() for details.
-        """
+        """Open the serial port and initialise absolute positioning mode."""
         with self._lock:
             if self._ser and self._ser.is_open:
                 logger.info(
@@ -126,77 +96,24 @@ class Printer:
                 )
                 return  # already connected
 
-            candidates: list[str] = [self.config.port]
-            for p in self.config.fallback_ports:
-                if p not in candidates:
-                    candidates.append(p)
-
-            logger.info("Scanning for printer on %s", ", ".join(candidates))
-
-            errors: list[str] = []
-            for port in candidates:
-                ser = None
-                try:
-                    logger.info("Trying %s …", port)
-                    ser = serial.Serial(
-                        port, self.config.baud_rate, timeout=self.config.timeout,
-                    )
-                    time.sleep(2)           # wait for Marlin greeting banner
-                    ser.reset_input_buffer()
-
-                    if not self._probe_marlin(ser):
-                        logger.info("  %s opened but did not identify as Marlin", port)
-                        errors.append(f"{port}: no M115 response")
-                        ser.close()
-                        continue
-
-                    self._ser = ser
-                    self.config.port = port
-                    self._send_locked("G90")        # absolute mode
-                    logger.info("Serial port open, absolute mode (%s)", port)
-                    return
-
-                except (serial.SerialException, OSError) as exc:
-                    logger.info("  %s unavailable: %s", port, exc)
-                    errors.append(f"{port}: {exc}")
-                    if ser is not None:
-                        try:
-                            ser.close()
-                        except Exception:
-                            pass
-
-            self._ser = None
-            raise PrinterNotConnectedError(
-                "No printer found on any candidate port. Tried:\n  "
-                + "\n  ".join(errors)
+            logger.info(
+                "Opening serial port %s @ %d baud (timeout=%.1fs)",
+                self.config.port, self.config.baud_rate, self.config.timeout,
             )
-
-    def _probe_marlin(self, ser: serial.Serial) -> bool:
-        """
-        Send M115 on *ser* and report whether it answers like Marlin.
-
-        Writes to the passed handle directly rather than via _send_locked,
-        which requires self._ser to already be assigned — that is exactly
-        what this call is still deciding.
-        """
-        try:
-            ser.reset_input_buffer()
-            ser.write(b"M115\n")
-            deadline = time.time() + 3.0
-            while time.time() < deadline:
-                raw = ser.readline().decode(errors="ignore").strip()
-                if not raw:
-                    continue
-                logger.debug("RX  %s", raw)
-                if "FIRMWARE_NAME" in raw:
-                    logger.info("  identified: %s", raw[:80])
-                    return True
-                if raw.startswith("ok"):
-                    return True
-            return False
-        except Exception as exc:
-            logger.debug("probe failed on %s: %s", ser.port, exc)
-            return False
+            self._ser = serial.Serial(
+                self.config.port,
+                self.config.baud_rate,
+                timeout=self.config.timeout,
+            )
+            logger.debug("Waiting 2 s for Marlin greeting banner…")
+            time.sleep(2)                   # wait for Marlin greeting banner
+            self._ser.reset_input_buffer()
+            logger.debug("Input buffer flushed after greeting")
+            self._send_locked("G90")        # absolute mode
+            logger.info(
+                "Serial port open and printer in absolute mode (%s)",
+                self.config.port,
+            )
 
     def disconnect(self) -> None:
         """Close the serial port gracefully."""
@@ -245,57 +162,6 @@ class Printer:
                 if parsed:
                     return Position(**{k: parsed.get(k, 0.0) for k in ("X", "Y", "Z", "E")})
         raise PrinterTimeoutError("M114 did not return position data in time")
-
-    def get_true_xy(self) -> tuple[float, float]:
-        """
-        Return the REAL (x_mm, y_mm) derived from the raw stepper counts.
-
-        Why this exists
-        ---------------
-        M114's X:/Y:/Z: fields cannot be trusted on this firmware. In
-        Buddy 6.4.0 prepare_move_to_destination() ends with:
-
-            prepare_move_to(destination, feedrate_mm_s, hints);
-            current_position = destination;     // unconditional
-
-        current_position is assigned even when prepare_move_to() bailed
-        out early because the target was unreachable. So a rejected move
-        still advances the reported position — that is how M114 came to
-        report Y:-319 while the head was physically sitting at -19.
-
-        The 'Count A:.. B:..' fields are the actual stepper positions and
-        do not lie. This is a CoreXY machine, so A/B are motor positions,
-        not axes; the firmware's own transform (homing_corexy.cpp) is:
-
-            x = (a + b) / 2
-            y = (a - b) / 2
-
-        divided by steps-per-mm.
-
-        Raises PrinterTimeoutError if no Count fields arrive in time.
-        """
-        with self._lock:
-            self._require_connected()
-            return self._true_xy_locked()
-
-    def _true_xy_locked(self) -> tuple[float, float]:
-        """get_true_xy() body; caller must already hold self._lock."""
-        self._ser.reset_input_buffer()
-        self._ser.write(b"M114\n")
-        logger.debug("TX  M114  (stepper counts)")
-
-        deadline = time.time() + self.config.timeout
-        while time.time() < deadline:
-            line = self._ser.readline().decode(errors="ignore").strip()
-            if not line:
-                continue
-            logger.debug("RX  %s", line)
-            m = re.search(r"Count\s+A:(-?\d+)\s+B:(-?\d+)", line)
-            if m:
-                a, b = int(m.group(1)), int(m.group(2))
-                spm = self.config.steps_per_mm_xy
-                return ((a + b) / 2.0 / spm, (a - b) / 2.0 / spm)
-        raise PrinterTimeoutError("M114 did not report stepper counts in time")
 
     def get_temperature(self) -> dict:
         """
@@ -367,59 +233,24 @@ class Printer:
 
         logger.info("move: axis=%s complete", axis)
 
-    @staticmethod
-    def _switch_triggered(gpio_manager, switch_name: str,
-                          samples: int = 5, gap_s: float = 0.004) -> bool:
-        """
-        Debounced limit-switch read: majority vote over several samples.
-
-        A SINGLE GPIO read taken right after a move is unreliable. The
-        steppers have just stopped, the drivers are still energised, and the
-        switch wiring runs alongside motor cables — one instantaneous sample
-        can catch a noise transient and report a phantom trigger. That is
-        what produced "X_MIN still held after a 4.0 mm retract" one second
-        after the monitor thread had logged X_MIN RELEASED.
-
-        gpio_manager's own monitor is immune because it polls every 50 ms and
-        only reports edges. These one-shot checks need their own defence, so
-        every switch test in home()/park() goes through here.
-        """
-        hits = 0
-        for i in range(samples):
-            # The one place that reads the pin directly — everywhere else
-            # in home()/park() must come through this method.
-            if gpio_manager.is_triggered(switch_name):
-                hits += 1
-            if i < samples - 1:
-                time.sleep(gap_s)
-        return hits * 2 > samples
-
     def home(self, axes: Optional[list[str]] = None) -> dict:
         """
-        Home X, Y, then Z by jogging toward each GPIO limit switch until
-        the pin is pulled LOW (triggered).
+        Home X, Y, then Z by jogging toward each GPIO limit switch in 2 mm
+        steps until the pin reads triggered. NO backoff — each axis is left
+        sitting on its switch (switch stays triggered).
 
         Does NOT send G28 — homing is done entirely via GPIO feedback.
 
         Default order (always X → Y → Z when axes is None / full home):
-            X_MIN (BCM 27)  seek G1 X+0.5, backoff X-
-            Y_MIN (BCM 17)  seek G1 Y+0.5, backoff Y-
-            Z_MIN (BCM 4)   seek G1 Z-0.5, backoff Z+
+            X_MIN (BCM 27)  seek G1 X+2  (x = x + 2)
+            Y_MIN (BCM 17)  seek G1 Y-2  (y = y - 2)
+            Z_MIN (BCM 4)   seek G1 Z-2  (z = z - 2)
 
         Per-axis sequence:
-            0. If already on the switch, back off until it releases (so X
-               always moves first even when seated on X_MIN)
-            1. Send G1 <axis><dir><step_mm> F600 toward the switch
-            2. Send M400 (block until motor physically stops)
-            3. Read GPIO — if switch is LOW (triggered), stop immediately
-            4. Back off opposite direction so the switch opens again
-
-        Seeking is two-pass, as firmware homing does: a fast COARSE pass at
-        coarse_step_mm, a retract of rehome_backoff_mm to release the switch,
-        then a slow FINE pass at fine_step_mm. GPIO is polled between steps,
-        so a single-pass seek is only accurate to one step — the fine pass is
-        what makes the reference repeatable. The roller levers tolerate the
-        coarse overshoot.
+            1. If the switch is already triggered, skip the axis (no move).
+            2. Send G1 <axis><±2> F600
+            3. Send M400 (block until motor physically stops)
+            4. Read GPIO — if triggered, stop and move on to the next axis.
 
         M400 is critical: Marlin's 'ok' for G1 only means the command was
         enqueued, not that the motor stopped.
@@ -428,88 +259,23 @@ class Printer:
         requested axes still follows X → Y → Z.
 
         Returns a dict with per-axis homing results.
-        Raises RuntimeError if any switch is never triggered within max_seek_mm.
+        Raises RuntimeError if any switch is never triggered within max travel.
         """
         import gpio_manager
 
-        # Per-axis seek config: switch name, seek sign (+1 / -1), step, backoff
+        # Per-axis seek config: switch name, seek sign (+1 / -1), step size.
         # Seek sign is the firmware G1 direction toward the limit switch.
-        #
-        # SEEK DIRECTION IS NOT FREE TO CHOOSE. Buddy boots every axis at
-        # one END of its travel window (motion.cpp:131, current_position =
-        # {X_HOME_POS, Y_HOME_POS, Z_HOME_POS}) regardless of where the head
-        # physically is, and position_is_reachable() then silently drops any
-        # move that would leave the window:
-        #
-        #   X  boots 252 (X_MAX_POS)  = the RIGHT end
-        #   Y  boots -19 (Y_MIN_POS)  = the FRONT end
-        #   Z  boots   0 (Z_MIN_POS)
-        #
-        # The switches sit at exactly those ends, and park() leaves the head
-        # ON them before power-off. So at the next boot the head is already
-        # at the switch and homing never has to seek toward it — which it
-        # could not do anyway, since the firmware believes it is standing
-        # there and refuses any move further that way.
-        #
-        # Every move homing does make IS legal:
-        #   - backing off a pressed switch goes AWAY from the boot end, which
-        #     is the direction with the whole window of room available
-        #   - the re-approach then seeks back within the room just created
-        #
-        # Seeking toward a switch from an arbitrary position only works when
-        # headroom already exists, i.e. once the head has moved away from the
-        # boot end. That is the end-of-session case, which is what park()
-        # does. If power is lost mid-session the head will be stranded away
-        # from the switches; push it to the right-front corner by hand before
-        # powering on. The headroom probe below catches that case.
         axis_home_cfg: dict[str, dict] = {
-            "X": {
-                "switch": "X_MIN",
-                "seek_sign": +1,   # RIGHT, switch on the right
-                "coarse_step_mm": 2.0,
-                "fine_step_mm": 0.1,
-                "backoff_mm": 3.0,
-            },
-            "Y": {
-                "switch": "Y_MIN",
-                "seek_sign": -1,   # FRONT, switch at the front
-                "coarse_step_mm": 2.0,
-                "fine_step_mm": 0.1,
-                "backoff_mm": 3.0,
-            },
-            "Z": {
-                "switch": "Z_MIN",
-                # Coarse step matches X/Y at 2.0 mm by request. Note this
-                # is the one axis where a coarse overshoot moves the head
-                # toward the bed rather than just squashing a lever, so the
-                # fine step stays small to keep the final reference tight.
-                "seek_sign": -1,   # toward Z_MIN, the boot end
-                "coarse_step_mm": 2.0,
-                "fine_step_mm": 0.05,
-                "backoff_mm": 1.0,
-            },
+            "X": {"switch": "X_MIN", "seek_sign": +1, "step_mm": 2.0},  # x = x + 2
+            "Y": {"switch": "Y_MIN", "seek_sign": -1, "step_mm": 2.0},  # y = y - 2
+            "Z": {"switch": "Z_MIN", "seek_sign": -1, "step_mm": 2.0},  # z = z - 2
         }
         # Fixed home order regardless of caller request list
         home_order = ("X", "Y", "Z")
         # Slow feed rate for safe approach (mm/min)
-        homing_feed = 300          # fine pass — slow, for a crisp trigger
-        coarse_feed = 1500         # coarse pass — lever absorbs the overshoot
-        # Safety cutoff (~300 mm max travel at 0.5 mm/step)
-        max_seek_mm = 300.0        # travel budget, valid at any step size
-        # Max steps while backing off a switch that was already pressed
-        max_backoff_steps = 40
-        # Retract between coarse and fine so the fine pass is a real approach.
-        # Must exceed coarse_step_mm or the switch may still be held.
-        rehome_backoff_mm = 4.0
-        # --- Disabled by request -------------------------------------
-        # USE_FINE_PASS: retract off the switch and re-approach slowly for a
-        #   repeatable reference. Off means homing stops at the coarse
-        #   trigger, so the reference is only good to one coarse step (2 mm).
-        # FINAL_BACKOFF: step off the switch when done. Off means the head
-        #   rests with the switch pressed, which matches how park() leaves it.
-        # Flip either back to True to restore the behaviour.
-        USE_FINE_PASS = False
-        FINAL_BACKOFF = False
+        homing_feed = 600
+        # Safety cutoff — maximum travel per axis before giving up
+        max_travel_mm = 300.0
 
         if axes:
             requested = {a.upper() for a in axes}
@@ -526,7 +292,7 @@ class Printer:
             to_home = list(home_order)
 
         logger.info(
-            "home: limit-switch sequence %s  feed=%d mm/min",
+            "home: limit-switch sequence %s  feed=%d mm/min (no backoff)",
             " → ".join(to_home), homing_feed,
         )
 
@@ -549,421 +315,69 @@ class Printer:
                 for axis in to_home:
                     cfg = axis_home_cfg[axis]
                     switch_name = cfg["switch"]
-                    coarse_step_mm = float(cfg["coarse_step_mm"])
-                    fine_step_mm = float(cfg["fine_step_mm"])
-                    backoff_mm = float(cfg["backoff_mm"])
+                    step_mm = float(cfg["step_mm"])
                     seek_sign = int(cfg["seek_sign"])
-                    # Opposite of seek — used to leave the switch
-                    backoff_sign = -seek_sign
-                    backoff_delta = backoff_sign * backoff_mm
-                    # One coarse step, used by the headroom probe below
-                    step_mm = coarse_step_mm
                     seek_delta = seek_sign * step_mm
-                    # Index into the (x, y) tuple from _true_xy_locked().
-                    # Only X and Y can be verified that way — the CoreXY
-                    # transform reads the A/B motor counts, and Z is not part
-                    # of it — so Z runs without the stall watch.
-                    idx = 0 if axis == "X" else 1
-                    can_stall_check = axis in ("X", "Y")
-
-                    def seek(step: float, feed: int, label: str) -> float:
-                        """
-                        Jog toward the switch in *step* mm increments until it
-                        trips. Returns millimetres travelled.
-
-                        GPIO is polled BETWEEN steps, so the head can overrun
-                        the true trigger point by up to one step — which is
-                        exactly why a coarse pass is followed by a fine one.
-                        """
-                        d = seek_sign * step
-                        travelled = 0.0
-                        # Stall watch. The one-shot headroom probe above can
-                        # pass on a couple of millimetres of slack and then
-                        # the axis runs out mid-seek, at which point every
-                        # further G1 is silently discarded. Without this the
-                        # loop grinds out the whole max_seek_mm budget and
-                        # blames the wiring, when the real cause is no
-                        # headroom. Re-check the true position periodically
-                        # and stop as soon as the steppers stop responding.
-                        check_every = 5
-                        last_true = (
-                            self._true_xy_locked()[idx] if can_stall_check else 0.0
-                        )
-                        since_check = 0
-
-                        for _ in range(int(max_seek_mm / step)):
-                            self._send_locked(f"G1 {axis}{d:+g} F{feed}")
-                            # M400 blocks until the motor has physically stopped
-                            self._send_locked("M400")
-                            travelled += step
-                            if self._switch_triggered(gpio_manager, switch_name):
-                                logger.info(
-                                    "home: %s %s pass tripped after %.2f mm",
-                                    switch_name, label, travelled,
-                                )
-                                return travelled
-
-                            since_check += 1
-                            if can_stall_check and since_check >= check_every:
-                                now_true = self._true_xy_locked()[idx]
-                                expected = step * check_every * 0.5
-                                if abs(now_true - last_true) < expected:
-                                    logger.warning(
-                                        "home: %s stalled — commanded %.1f mm "
-                                        "but the steppers moved %.3f mm; "
-                                        "giving up on this pass",
-                                        axis, step * check_every,
-                                        abs(now_true - last_true),
-                                    )
-                                    raise _SeekStalled(travelled)
-                                last_true = now_true
-                                since_check = 0
-                        return travelled
+                    max_steps = int(max_travel_mm / step_mm)
 
                     logger.info(
-                        "========== HOMING AXIS %s  switch=%s  coarse=%.1f fine=%.2f ==========",
-                        axis, switch_name, coarse_step_mm, fine_step_mm,
+                        "home: seeking %s  switch=%s  step=%+.1f mm",
+                        axis, switch_name, seek_delta,
                     )
 
-                    # True when already seated on the switch before this axis starts
-                    already_at_switch = self._switch_triggered(gpio_manager, switch_name)
-
-                    # ---- Headroom probe (only when NOT on the switch) ---
-                    # At every cold boot Buddy initialises position to the
-                    # BOTTOM of its travel window:
-                    #
-                    #   motion.cpp:131
-                    #   xyze_pos_t current_position =
-                    #       { X_HOME_POS, Y_HOME_POS, Z_HOME_POS };
-                    #
-                    # which for min-homed axes resolve to X_MIN_POS (-2)
-                    # and Y_MIN_POS (-19) — wherever the head physically
-                    # is. Our switches sit at that same minimum end, so a
-                    # seek is negative and the firmware has ZERO room to
-                    # give: every step is silently dropped by
-                    # position_is_reachable() while M114 counts down
-                    # anyway. One step checked against the STEPPER COUNTS
-                    # turns that silent no-op into a clear error.
-                    #
-                    # This only applies when the head is NOT already on
-                    # the switch. Starting ON the switch is the CORRECT
-                    # state: there the first move is a positive backoff,
-                    # which always has headroom, so probing negatively
-                    # here would fail a perfectly good setup.
-                    if not already_at_switch and axis in ("X", "Y"):
-                        idx = 0 if axis == "X" else 1
-                        probe_before = self._true_xy_locked()
-                        self._send_locked(
-                            f"G1 {axis}{seek_delta:+g} F{homing_feed}"
-                        )
-                        self._send_locked("M400")
-                        probe_after = self._true_xy_locked()
-
-                        moved = abs(probe_after[idx] - probe_before[idx])
-                        logger.info(
-                            "home: %s headroom probe moved %.3f mm (want ~%.2f)",
-                            axis, moved, step_mm,
-                        )
-                        if moved < step_mm * 0.5:
-                            msg = (
-                                f"{axis} is blocked: commanded "
-                                f"{seek_delta:+g} mm but the steppers moved "
-                                f"only {moved:.3f} mm. The head is not on "
-                                f"{switch_name} and {axis} boots pinned "
-                                f"against the end the switch sits at, so the "
-                                f"firmware refuses to travel further that way. "
-                                f"Push the head into the RIGHT-FRONT corner by "
-                                f"hand with the power off, then home again "
-                                f"(park() before shutdown prevents this)."
-                            )
-                            logger.warning("home: %s", msg)
-                            results[axis] = {
-                                "switch":         switch_name,
-                                "reached_switch": False,
-                                "error":          msg,
-                            }
-                            continue
-
-                    # If already on the switch, move away until it releases so the
-                    # following seek is a full approach (X is never "invisible").
+                    already_at_switch = gpio_manager.is_triggered(switch_name)
                     if already_at_switch:
                         logger.info(
-                            "home: %s already TRIGGERED — backing off until released "
-                            "before seek",
-                            switch_name,
+                            "home: %s already triggered — leaving %s in place",
+                            switch_name, axis,
                         )
-                        released = False
-                        for _ in range(max_backoff_steps):
+
+                    steps_taken = 0
+                    if not already_at_switch:
+                        for _ in range(max_steps):
+                            # Jog one step toward the limit switch.
                             self._send_locked(
-                                f"G1 {axis}{backoff_delta:+g} F{homing_feed}"
+                                f"G1 {axis}{seek_delta:+g} F{homing_feed}"
                             )
+                            # M400 waits until the motor has physically stopped.
                             self._send_locked("M400")
-                            if not self._switch_triggered(gpio_manager, switch_name):
-                                released = True
+                            steps_taken += 1
+
+                            if gpio_manager.is_triggered(switch_name):
                                 logger.info(
-                                    "home: %s released — starting seek on %s",
-                                    switch_name, axis,
+                                    "home: %s triggered after %d step(s) (%.1f mm) "
+                                    "— no backoff, switch left triggered",
+                                    switch_name, steps_taken, steps_taken * step_mm,
                                 )
                                 break
-                        if not released:
-                            # Also non-fatal. The head is already sitting on
-                            # the switch, which IS the reference, so treat
-                            # this as "already home" rather than an error.
-                            logger.warning(
-                                "home: %s stayed pressed through %d backoff "
-                                "step(s) on %s — treating the current position "
-                                "as the reference",
-                                switch_name, max_backoff_steps, axis,
+
+                        if not gpio_manager.is_triggered(switch_name):
+                            raise RuntimeError(
+                                f"Homing failed: {switch_name} not triggered after "
+                                f"{steps_taken} step(s) of {step_mm} mm on "
+                                f"{axis}{'+' if seek_sign > 0 else '-'} axis. "
+                                f"Check wiring or increase max_travel_mm."
                             )
-
-                    # ---- Pass 1: coarse and fast -----------------------
-                    try:
-                        coarse_mm = seek(coarse_step_mm, coarse_feed, "coarse")
-                    except _SeekStalled as stall:
-                        # The axis ran out of travel window mid-seek. This is
-                        # the same root cause the headroom probe catches, just
-                        # discovered later — report it as such rather than
-                        # letting the generic "never tripped" message blame
-                        # the wiring.
-                        msg = (
-                            f"{axis} ran out of travel after "
-                            f"{stall.travelled_mm:.1f} mm: the firmware stopped "
-                            f"executing moves toward {switch_name}. {axis} boots "
-                            f"pinned against the end the switch sits at, so once "
-                            f"the initial slack is used up nothing more happens. "
-                            f"Push the head into the RIGHT-FRONT corner by hand "
-                            f"with the power off, then home again (park() before "
-                            f"shutdown prevents this)."
-                        )
-                        logger.warning("home: %s", msg)
-                        results[axis] = {
-                            "switch":         switch_name,
-                            "reached_switch": False,
-                            "coarse_mm":      round(stall.travelled_mm, 3),
-                            "error":          msg,
-                        }
-                        continue
-
-                    if not self._switch_triggered(gpio_manager, switch_name):
-                        msg = (
-                            f"{switch_name} never tripped in {coarse_mm:.1f} mm "
-                            f"of seek on {axis}"
-                            f"{'+' if seek_sign > 0 else '-'}. Check wiring, or "
-                            f"raise max_seek_mm."
-                        )
-                        logger.warning("home: %s", msg)
-                        results[axis] = {
-                            "switch":         switch_name,
-                            "reached_switch": False,
-                            "coarse_mm":      round(coarse_mm, 3),
-                            "error":          msg,
-                        }
-                        continue
-
-                    fine_mm = 0.0
-                    if USE_FINE_PASS:
-                        # ---- Retract clear of the switch ---------------
-                        # The fine pass must start from a released state so
-                        # the point it finds is a genuine approach, not
-                        # wherever the coarse pass happened to overshoot to.
-                        logger.info(
-                            "home: retracting %+.1f mm before the fine pass on %s",
-                            backoff_sign * rehome_backoff_mm, axis,
-                        )
-                        self._send_locked(
-                            f"G1 {axis}{backoff_sign * rehome_backoff_mm:+g} "
-                            f"F{homing_feed}"
-                        )
-                        self._send_locked("M400")
-                        if self._switch_triggered(gpio_manager, switch_name):
-                            # Not fatal: a switch that stays pressed is an
-                            # expected resting state here. Skip the fine pass
-                            # and keep the coarse trigger as the reference.
-                            logger.warning(
-                                "home: %s still pressed after a %.1f mm retract "
-                                "— skipping the fine pass, keeping the coarse "
-                                "reference for %s",
-                                switch_name, rehome_backoff_mm, axis,
-                            )
-                        else:
-                            # ---- Pass 2: fine and slow — real reference -
-                            fine_mm = seek(fine_step_mm, homing_feed, "fine")
-                            if not self._switch_triggered(gpio_manager, switch_name):
-                                logger.warning(
-                                    "home: %s did not re-trigger during the "
-                                    "fine pass after %.2f mm on %s — keeping "
-                                    "the coarse reference",
-                                    switch_name, fine_mm, axis,
-                                )
-
-                    if FINAL_BACKOFF:
-                        logger.info(
-                            "home: final backoff %+.1f mm on %s to release %s",
-                            backoff_delta, axis, switch_name,
-                        )
-                        self._send_locked(
-                            f"G1 {axis}{backoff_delta:+g} F{homing_feed}"
-                        )
-                        self._send_locked("M400")
-                        switch_released = not self._switch_triggered(
-                            gpio_manager, switch_name
-                        )
-                        if not switch_released:
-                            logger.warning(
-                                "home: %s still grounded after %.1f mm backoff",
-                                switch_name, backoff_mm,
-                            )
-                    else:
-                        # Head is left resting ON the switch, same as park().
-                        switch_released = False
-                        logger.info(
-                            "home: leaving %s pressed (final backoff disabled)",
-                            switch_name,
-                        )
-
-                    logger.info("========== AXIS %s DONE ==========", axis)
 
                     results[axis] = {
                         "switch":            switch_name,
                         "reached_switch":    True,
-                        "coarse_mm":         round(coarse_mm, 3),
-                        "fine_mm":            round(fine_mm, 3),
-                        "coarse_step_mm":    coarse_step_mm,
-                        "fine_step_mm":      fine_step_mm,
-                        "seek_sign":         seek_sign,
-                        "backoff_mm":        backoff_mm,
-                        "switch_released":   switch_released,
+                        "steps":             steps_taken,
+                        "distance_mm":       round(steps_taken * step_mm, 3),
+                        "seek_delta_mm":     seek_delta,
+                        "backoff_mm":        0.0,
+                        "switch_triggered":  True,
                         "already_at_switch": already_at_switch,
                     }
             finally:
                 # Always restore absolute mode even if an axis fails mid-sequence
                 self._send_locked("G90")
 
-            # Partial success is reported, not raised: one axis failing no
-            # longer stops the others from homing.
-            failed = [a for a, r in results.items() if not r.get("reached_switch")]
-            if failed:
-                logger.warning(
-                    "home: finished with %d/%d axes referenced — failed: %s",
-                    len(results) - len(failed), len(results), ", ".join(failed),
-                )
-            else:
-                logger.info("home: all %d axes referenced", len(results))
-
             return {
                 "method":  "limit_switch",
                 "axes":    to_home,
-                "homed":   not failed,
-                "failed":  failed,
                 "results": results,
             }
-
-    def park(self, max_travel_mm: float = 300.0) -> dict:
-        """
-        Drive X and Y onto their limit switches and LEAVE the head there.
-        Call this at the end of every session, before powering down.
-
-        This is the operation the whole setup depends on.
-
-        Buddy assigns current_position = {X_HOME_POS, Y_HOME_POS, Z_HOME_POS}
-        at every cold boot — for this machine X_MAX_POS (252, right) and
-        Y_MIN_POS (-19, front) — no matter where the head really is. Nothing
-        over serial can correct that afterwards: G92 only shifts the workspace
-        offset (G92.cpp does `position_shift[i] += d` for X/Y/Z and leaves
-        native position alone), and the clamp that enforces travel reads the
-        raw compile-time macros. Homing state does not survive either; it
-        lives in RAM and is gone at power-off.
-
-        So the ONLY thing that carries across a power cycle is where the head
-        physically is. Parking it on the switches — which sit at exactly the
-        coordinates the firmware will assume — makes that assumption true, and
-        does it to switch precision rather than however hard someone pushed the
-        head into a corner by hand.
-
-        Unlike home(), this does NOT back off at the end. The head is meant to
-        stay pressed on the switches so the next boot starts there.
-
-        Seeking here is legal because by now the head has moved away from the
-        boot end during the session, so headroom toward the switches exists.
-        That is not true at boot, which is why home() cannot seek and park()
-        can.
-        """
-        import gpio_manager
-
-        # Same ends the firmware boots at: X -> right (X_MAX), Y -> front (Y_MIN)
-        park_cfg = (("X", "X_MIN", +1), ("Y", "Y_MIN", -1))
-        park_feed = 1500
-        step_mm = 1.0
-
-        logger.info("park: seeking limit switches to set up the next boot")
-
-        with self._lock:
-            self._require_connected()
-
-            if not gpio_manager.gpio_available():
-                raise RuntimeError(
-                    "GPIO not available — cannot park without limit switches."
-                )
-
-            self._ser.reset_input_buffer()
-            self._send_locked("G91")   # relative
-            results: dict[str, dict] = {}
-
-            try:
-                for axis, switch_name, seek_sign in park_cfg:
-                    idx = 0 if axis == "X" else 1
-                    delta = seek_sign * step_mm
-
-                    if self._switch_triggered(gpio_manager, switch_name):
-                        logger.info(
-                            "park: %s already resting on %s", axis, switch_name
-                        )
-                        results[axis] = {"switch": switch_name,
-                                         "already_parked": True,
-                                         "reached_switch": True,
-                                         "travelled_mm": 0.0}
-                        continue
-
-                    start = self._true_xy_locked()
-                    reached = False
-
-                    for _ in range(int(max_travel_mm / step_mm)):
-                        self._send_locked(f"G1 {axis}{delta:+g} F{park_feed}")
-                        self._send_locked("M400")
-                        if self._switch_triggered(gpio_manager, switch_name):
-                            reached = True
-                            break
-
-                    end = self._true_xy_locked()
-                    travelled = abs(end[idx] - start[idx])
-
-                    if reached:
-                        logger.info(
-                            "park: %s parked on %s after %.1f mm",
-                            axis, switch_name, travelled,
-                        )
-                    else:
-                        logger.warning(
-                            "park: %s never reached %s — only %.1f mm of real "
-                            "travel. The next boot will NOT be aligned.",
-                            axis, switch_name, travelled,
-                        )
-
-                    results[axis] = {"switch": switch_name,
-                                     "already_parked": False,
-                                     "reached_switch": reached,
-                                     "travelled_mm": round(travelled, 2)}
-            finally:
-                self._send_locked("G90")   # restore absolute
-
-        parked = all(r["reached_switch"] for r in results.values())
-        logger.info("park: complete  parked=%s", parked)
-        if not parked:
-            logger.warning(
-                "park: INCOMPLETE — push the head into the right-front corner "
-                "by hand before powering on, or the next session cannot home."
-            )
-        return {"parked": parked, "results": results}
 
     def emergency_stop(self) -> None:
         """Send M112 (firmware emergency stop — requires printer reset)."""
