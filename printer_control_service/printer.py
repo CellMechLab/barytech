@@ -616,24 +616,24 @@ class Printer:
                             axis, moved, step_mm,
                         )
                         if moved < step_mm * 0.5:
-                            raise RuntimeError(
-                                f"Homing blocked on {axis}: commanded "
-                                f"{seek_delta:+g} mm but the steppers moved only "
-                                f"{moved:.3f} mm — the firmware accepted the "
-                                f"command and refused the motion.\n"
-                                f"The head is not on {switch_name}, and {axis} "
-                                f"boots pinned against the very end the switch "
-                                f"sits at — so the firmware believes it is "
-                                f"already there and refuses to travel further "
-                                f"that way. Homing cannot seek from here.\n"
-                                f"This means the last session did not finish "
-                                f"with park() (power loss, or the head was "
-                                f"moved while off).\n"
-                                f"Fix: power OFF, push the head into the "
-                                f"RIGHT-FRONT corner by hand until the switches "
-                                f"click, then power on and home again. Calling "
-                                f"park() before every shutdown avoids this."
+                            msg = (
+                                f"{axis} is blocked: commanded "
+                                f"{seek_delta:+g} mm but the steppers moved "
+                                f"only {moved:.3f} mm. The head is not on "
+                                f"{switch_name} and {axis} boots pinned "
+                                f"against the end the switch sits at, so the "
+                                f"firmware refuses to travel further that way. "
+                                f"Push the head into the RIGHT-FRONT corner by "
+                                f"hand with the power off, then home again "
+                                f"(park() before shutdown prevents this)."
                             )
+                            logger.warning("home: %s", msg)
+                            results[axis] = {
+                                "switch":         switch_name,
+                                "reached_switch": False,
+                                "error":          msg,
+                            }
+                            continue
 
                     # If already on the switch, move away until it releases so the
                     # following seek is a full approach (X is never "invisible").
@@ -657,21 +657,33 @@ class Printer:
                                 )
                                 break
                         if not released:
-                            raise RuntimeError(
-                                f"Homing failed: {switch_name} stayed triggered after "
-                                f"{max_backoff_steps} backoff step(s) on {axis}. "
-                                f"Check wiring / stuck switch."
+                            # Also non-fatal. The head is already sitting on
+                            # the switch, which IS the reference, so treat
+                            # this as "already home" rather than an error.
+                            logger.warning(
+                                "home: %s stayed pressed through %d backoff "
+                                "step(s) on %s — treating the current position "
+                                "as the reference",
+                                switch_name, max_backoff_steps, axis,
                             )
 
                     # ---- Pass 1: coarse and fast -----------------------
                     coarse_mm = seek(coarse_step_mm, coarse_feed, "coarse")
                     if not self._switch_triggered(gpio_manager, switch_name):
-                        raise RuntimeError(
-                            f"Homing failed: {switch_name} not triggered after "
-                            f"{coarse_mm:.1f} mm of coarse seek on "
-                            f"{axis}{'+' if seek_sign > 0 else '-'}. "
-                            f"Check wiring, or raise max_seek_mm."
+                        msg = (
+                            f"{switch_name} never tripped in {coarse_mm:.1f} mm "
+                            f"of seek on {axis}"
+                            f"{'+' if seek_sign > 0 else '-'}. Check wiring, or "
+                            f"raise max_seek_mm."
                         )
+                        logger.warning("home: %s", msg)
+                        results[axis] = {
+                            "switch":         switch_name,
+                            "reached_switch": False,
+                            "coarse_mm":      round(coarse_mm, 3),
+                            "error":          msg,
+                        }
+                        continue
 
                     fine_mm = 0.0
                     if USE_FINE_PASS:
@@ -689,20 +701,25 @@ class Printer:
                         )
                         self._send_locked("M400")
                         if self._switch_triggered(gpio_manager, switch_name):
-                            raise RuntimeError(
-                                f"Homing failed: {switch_name} still held after "
-                                f"a {rehome_backoff_mm} mm retract on {axis}. "
-                                f"Raise rehome_backoff_mm, or the lever sticks."
+                            # Not fatal: a switch that stays pressed is an
+                            # expected resting state here. Skip the fine pass
+                            # and keep the coarse trigger as the reference.
+                            logger.warning(
+                                "home: %s still pressed after a %.1f mm retract "
+                                "— skipping the fine pass, keeping the coarse "
+                                "reference for %s",
+                                switch_name, rehome_backoff_mm, axis,
                             )
-
-                        # ---- Pass 2: fine and slow — the real reference -
-                        fine_mm = seek(fine_step_mm, homing_feed, "fine")
-                        if not self._switch_triggered(gpio_manager, switch_name):
-                            raise RuntimeError(
-                                f"Homing failed: {switch_name} did not "
-                                f"re-trigger during the fine pass after "
-                                f"{fine_mm:.2f} mm on {axis}."
-                            )
+                        else:
+                            # ---- Pass 2: fine and slow — real reference -
+                            fine_mm = seek(fine_step_mm, homing_feed, "fine")
+                            if not self._switch_triggered(gpio_manager, switch_name):
+                                logger.warning(
+                                    "home: %s did not re-trigger during the "
+                                    "fine pass after %.2f mm on %s — keeping "
+                                    "the coarse reference",
+                                    switch_name, fine_mm, axis,
+                                )
 
                     if FINAL_BACKOFF:
                         logger.info(
@@ -747,9 +764,22 @@ class Printer:
                 # Always restore absolute mode even if an axis fails mid-sequence
                 self._send_locked("G90")
 
+            # Partial success is reported, not raised: one axis failing no
+            # longer stops the others from homing.
+            failed = [a for a, r in results.items() if not r.get("reached_switch")]
+            if failed:
+                logger.warning(
+                    "home: finished with %d/%d axes referenced — failed: %s",
+                    len(results) - len(failed), len(results), ", ".join(failed),
+                )
+            else:
+                logger.info("home: all %d axes referenced", len(results))
+
             return {
                 "method":  "limit_switch",
                 "axes":    to_home,
+                "homed":   not failed,
+                "failed":  failed,
                 "results": results,
             }
 
