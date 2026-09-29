@@ -354,6 +354,33 @@ class Printer:
 
         logger.info("move: axis=%s complete", axis)
 
+    @staticmethod
+    def _switch_triggered(gpio_manager, switch_name: str,
+                          samples: int = 5, gap_s: float = 0.004) -> bool:
+        """
+        Debounced limit-switch read: majority vote over several samples.
+
+        A SINGLE GPIO read taken right after a move is unreliable. The
+        steppers have just stopped, the drivers are still energised, and the
+        switch wiring runs alongside motor cables — one instantaneous sample
+        can catch a noise transient and report a phantom trigger. That is
+        what produced "X_MIN still held after a 4.0 mm retract" one second
+        after the monitor thread had logged X_MIN RELEASED.
+
+        gpio_manager's own monitor is immune because it polls every 50 ms and
+        only reports edges. These one-shot checks need their own defence, so
+        every switch test in home()/park() goes through here.
+        """
+        hits = 0
+        for i in range(samples):
+            # The one place that reads the pin directly — everywhere else
+            # in home()/park() must come through this method.
+            if gpio_manager.is_triggered(switch_name):
+                hits += 1
+            if i < samples - 1:
+                time.sleep(gap_s)
+        return hits * 2 > samples
+
     def home(self, axes: Optional[list[str]] = None) -> dict:
         """
         Home X, Y, then Z by jogging toward each GPIO limit switch until
@@ -461,6 +488,15 @@ class Printer:
         # Retract between coarse and fine so the fine pass is a real approach.
         # Must exceed coarse_step_mm or the switch may still be held.
         rehome_backoff_mm = 4.0
+        # --- Disabled by request -------------------------------------
+        # USE_FINE_PASS: retract off the switch and re-approach slowly for a
+        #   repeatable reference. Off means homing stops at the coarse
+        #   trigger, so the reference is only good to one coarse step (2 mm).
+        # FINAL_BACKOFF: step off the switch when done. Off means the head
+        #   rests with the switch pressed, which matches how park() leaves it.
+        # Flip either back to True to restore the behaviour.
+        USE_FINE_PASS = False
+        FINAL_BACKOFF = False
 
         if axes:
             requested = {a.upper() for a in axes}
@@ -527,7 +563,7 @@ class Printer:
                             # M400 blocks until the motor has physically stopped
                             self._send_locked("M400")
                             travelled += step
-                            if gpio_manager.is_triggered(switch_name):
+                            if self._switch_triggered(gpio_manager, switch_name):
                                 logger.info(
                                     "home: %s %s pass tripped after %.2f mm",
                                     switch_name, label, travelled,
@@ -541,7 +577,7 @@ class Printer:
                     )
 
                     # True when already seated on the switch before this axis starts
-                    already_at_switch = gpio_manager.is_triggered(switch_name)
+                    already_at_switch = self._switch_triggered(gpio_manager, switch_name)
 
                     # ---- Headroom probe (only when NOT on the switch) ---
                     # At every cold boot Buddy initialises position to the
@@ -613,7 +649,7 @@ class Printer:
                                 f"G1 {axis}{backoff_delta:+g} F{homing_feed}"
                             )
                             self._send_locked("M400")
-                            if not gpio_manager.is_triggered(switch_name):
+                            if not self._switch_triggered(gpio_manager, switch_name):
                                 released = True
                                 logger.info(
                                     "home: %s released — starting seek on %s",
@@ -629,7 +665,7 @@ class Printer:
 
                     # ---- Pass 1: coarse and fast -----------------------
                     coarse_mm = seek(coarse_step_mm, coarse_feed, "coarse")
-                    if not gpio_manager.is_triggered(switch_name):
+                    if not self._switch_triggered(gpio_manager, switch_name):
                         raise RuntimeError(
                             f"Homing failed: {switch_name} not triggered after "
                             f"{coarse_mm:.1f} mm of coarse seek on "
@@ -637,50 +673,60 @@ class Printer:
                             f"Check wiring, or raise max_seek_mm."
                         )
 
-                    # ---- Retract clear of the switch -------------------
-                    # The fine pass must start from a released state so the
-                    # point it finds is a genuine approach, not wherever the
-                    # coarse pass happened to overshoot to.
-                    logger.info(
-                        "home: retracting %+.1f mm before the fine pass on %s",
-                        backoff_sign * rehome_backoff_mm, axis,
-                    )
-                    self._send_locked(
-                        f"G1 {axis}{backoff_sign * rehome_backoff_mm:+g} "
-                        f"F{homing_feed}"
-                    )
-                    self._send_locked("M400")
-                    if gpio_manager.is_triggered(switch_name):
-                        raise RuntimeError(
-                            f"Homing failed: {switch_name} still held after a "
-                            f"{rehome_backoff_mm} mm retract on {axis}. Raise "
-                            f"rehome_backoff_mm, or the lever is sticking."
+                    fine_mm = 0.0
+                    if USE_FINE_PASS:
+                        # ---- Retract clear of the switch ---------------
+                        # The fine pass must start from a released state so
+                        # the point it finds is a genuine approach, not
+                        # wherever the coarse pass happened to overshoot to.
+                        logger.info(
+                            "home: retracting %+.1f mm before the fine pass on %s",
+                            backoff_sign * rehome_backoff_mm, axis,
                         )
-
-                    # ---- Pass 2: fine and slow — this is the reference --
-                    fine_mm = seek(fine_step_mm, homing_feed, "fine")
-                    if not gpio_manager.is_triggered(switch_name):
-                        raise RuntimeError(
-                            f"Homing failed: {switch_name} did not re-trigger "
-                            f"during the fine pass after {fine_mm:.2f} mm on "
-                            f"{axis}. Switch may be intermittent."
+                        self._send_locked(
+                            f"G1 {axis}{backoff_sign * rehome_backoff_mm:+g} "
+                            f"F{homing_feed}"
                         )
+                        self._send_locked("M400")
+                        if self._switch_triggered(gpio_manager, switch_name):
+                            raise RuntimeError(
+                                f"Homing failed: {switch_name} still held after "
+                                f"a {rehome_backoff_mm} mm retract on {axis}. "
+                                f"Raise rehome_backoff_mm, or the lever sticks."
+                            )
 
-                    # Final retract so the pin is no longer grounded.
-                    logger.info(
-                        "home: final backoff %+.1f mm on %s to release %s",
-                        backoff_delta, axis, switch_name,
-                    )
-                    self._send_locked(
-                        f"G1 {axis}{backoff_delta:+g} F{homing_feed}"
-                    )
-                    self._send_locked("M400")
+                        # ---- Pass 2: fine and slow — the real reference -
+                        fine_mm = seek(fine_step_mm, homing_feed, "fine")
+                        if not self._switch_triggered(gpio_manager, switch_name):
+                            raise RuntimeError(
+                                f"Homing failed: {switch_name} did not "
+                                f"re-trigger during the fine pass after "
+                                f"{fine_mm:.2f} mm on {axis}."
+                            )
 
-                    switch_released = not gpio_manager.is_triggered(switch_name)
-                    if not switch_released:
-                        logger.warning(
-                            "home: %s still grounded after %.1f mm backoff",
-                            switch_name, backoff_mm,
+                    if FINAL_BACKOFF:
+                        logger.info(
+                            "home: final backoff %+.1f mm on %s to release %s",
+                            backoff_delta, axis, switch_name,
+                        )
+                        self._send_locked(
+                            f"G1 {axis}{backoff_delta:+g} F{homing_feed}"
+                        )
+                        self._send_locked("M400")
+                        switch_released = not self._switch_triggered(
+                            gpio_manager, switch_name
+                        )
+                        if not switch_released:
+                            logger.warning(
+                                "home: %s still grounded after %.1f mm backoff",
+                                switch_name, backoff_mm,
+                            )
+                    else:
+                        # Head is left resting ON the switch, same as park().
+                        switch_released = False
+                        logger.info(
+                            "home: leaving %s pressed (final backoff disabled)",
+                            switch_name,
                         )
 
                     logger.info("========== AXIS %s DONE ==========", axis)
@@ -763,7 +809,7 @@ class Printer:
                     idx = 0 if axis == "X" else 1
                     delta = seek_sign * step_mm
 
-                    if gpio_manager.is_triggered(switch_name):
+                    if self._switch_triggered(gpio_manager, switch_name):
                         logger.info(
                             "park: %s already resting on %s", axis, switch_name
                         )
@@ -779,7 +825,7 @@ class Printer:
                     for _ in range(int(max_travel_mm / step_mm)):
                         self._send_locked(f"G1 {axis}{delta:+g} F{park_feed}")
                         self._send_locked("M400")
-                        if gpio_manager.is_triggered(switch_name):
+                        if self._switch_triggered(gpio_manager, switch_name):
                             reached = True
                             break
 
