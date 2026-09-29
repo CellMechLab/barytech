@@ -40,21 +40,19 @@ class PrinterTimeoutError(RuntimeError):
 
 @dataclass
 class PrinterConfig:
-    # Preferred port. connect() tries this first, then anything in
-    # fallback_ports that isn't already this one — the Pi reassigns
-    # /dev/ttyACM* on reboot/replug, so a fixed port is unreliable.
+    # Preferred port; connect() falls back through the others because the
+    # Pi renumbers /dev/ttyACM* on reboot or replug.
     port: str = "/dev/ttyACM2"
-    fallback_ports: tuple[str, ...] = (
-        "/dev/ttyACM0",
-        "/dev/ttyACM1",
-        "/dev/ttyACM2",
-    )
+    fallback_ports: tuple[str, ...] = ("/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2")
     baud_rate: int = 230400
     timeout: float = 5.0
     # Feed rates (mm/min)
     feed_xy: int = 3000
     feed_z: int = 1000
     feed_e: int = 300
+    # M92 on this machine reports X100 Y100 — needed to convert the raw
+    # CoreXY A/B stepper counts in M114 back into real millimetres.
+    steps_per_mm_xy: float = 100.0
 
 
 @dataclass
@@ -98,13 +96,14 @@ class Printer:
         """
         Open the serial port and initialise absolute positioning mode.
 
-        Tries config.port first, then each entry in config.fallback_ports.
-        A port only counts as "the printer" if it answers M115 with a
-        FIRMWARE_NAME line — otherwise some other ACM device (or a port
-        that opens but never replies) would be accepted silently.
+        Tries config.port first, then config.fallback_ports. A port only
+        counts as the printer if it answers M115 like Marlin, so another
+        ACM device is not silently adopted.
 
-        The port that actually worked is written back to config.port so
-        later reconnects start with the one most likely to succeed.
+        NOTE: no M211 S0 here. On Buddy 6.4.0 the travel clamp that bites
+        us is position_is_reachable(), which tests the raw compile-time
+        X/Y_MIN_POS..MAX_POS macros and is NOT controlled by M211 — so
+        disabling soft endstops changes nothing. See home() for details.
         """
         with self._lock:
             if self._ser and self._ser.is_open:
@@ -114,16 +113,12 @@ class Printer:
                 )
                 return  # already connected
 
-            # config.port first, then the fallbacks, without duplicates
             candidates: list[str] = [self.config.port]
             for p in self.config.fallback_ports:
                 if p not in candidates:
                     candidates.append(p)
 
-            logger.info(
-                "Scanning for printer on %s @ %d baud",
-                ", ".join(candidates), self.config.baud_rate,
-            )
+            logger.info("Scanning for printer on %s", ", ".join(candidates))
 
             errors: list[str] = []
             for port in candidates:
@@ -131,11 +126,8 @@ class Printer:
                 try:
                     logger.info("Trying %s …", port)
                     ser = serial.Serial(
-                        port,
-                        self.config.baud_rate,
-                        timeout=self.config.timeout,
+                        port, self.config.baud_rate, timeout=self.config.timeout,
                     )
-                    logger.debug("Waiting 2 s for Marlin greeting banner…")
                     time.sleep(2)           # wait for Marlin greeting banner
                     ser.reset_input_buffer()
 
@@ -145,18 +137,13 @@ class Printer:
                         ser.close()
                         continue
 
-                    # Accepted — keep this handle and finish initialisation
                     self._ser = ser
                     self.config.port = port
                     self._send_locked("G90")        # absolute mode
-                    logger.info(
-                        "Serial port open and printer in absolute mode (%s)",
-                        port,
-                    )
+                    logger.info("Serial port open, absolute mode (%s)", port)
                     return
 
                 except (serial.SerialException, OSError) as exc:
-                    # Port missing, busy, or permission denied — try the next
                     logger.info("  %s unavailable: %s", port, exc)
                     errors.append(f"{port}: {exc}")
                     if ser is not None:
@@ -173,18 +160,15 @@ class Printer:
 
     def _probe_marlin(self, ser: serial.Serial) -> bool:
         """
-        Send M115 on *ser* and return True if it answers like Marlin.
+        Send M115 on *ser* and report whether it answers like Marlin.
 
-        Accepts either a FIRMWARE_NAME line or a plain 'ok', since some
-        forks answer tersely. Does not use _send_locked — that requires
-        self._ser to already be assigned, which is exactly what we're
-        still deciding here.
+        Writes to the passed handle directly rather than via _send_locked,
+        which requires self._ser to already be assigned — that is exactly
+        what this call is still deciding.
         """
         try:
             ser.reset_input_buffer()
             ser.write(b"M115\n")
-            logger.debug("TX  M115  (probe on %s)", ser.port)
-
             deadline = time.time() + 3.0
             while time.time() < deadline:
                 raw = ser.readline().decode(errors="ignore").strip()
@@ -248,6 +232,57 @@ class Printer:
                 if parsed:
                     return Position(**{k: parsed.get(k, 0.0) for k in ("X", "Y", "Z", "E")})
         raise PrinterTimeoutError("M114 did not return position data in time")
+
+    def get_true_xy(self) -> tuple[float, float]:
+        """
+        Return the REAL (x_mm, y_mm) derived from the raw stepper counts.
+
+        Why this exists
+        ---------------
+        M114's X:/Y:/Z: fields cannot be trusted on this firmware. In
+        Buddy 6.4.0 prepare_move_to_destination() ends with:
+
+            prepare_move_to(destination, feedrate_mm_s, hints);
+            current_position = destination;     // unconditional
+
+        current_position is assigned even when prepare_move_to() bailed
+        out early because the target was unreachable. So a rejected move
+        still advances the reported position — that is how M114 came to
+        report Y:-319 while the head was physically sitting at -19.
+
+        The 'Count A:.. B:..' fields are the actual stepper positions and
+        do not lie. This is a CoreXY machine, so A/B are motor positions,
+        not axes; the firmware's own transform (homing_corexy.cpp) is:
+
+            x = (a + b) / 2
+            y = (a - b) / 2
+
+        divided by steps-per-mm.
+
+        Raises PrinterTimeoutError if no Count fields arrive in time.
+        """
+        with self._lock:
+            self._require_connected()
+            return self._true_xy_locked()
+
+    def _true_xy_locked(self) -> tuple[float, float]:
+        """get_true_xy() body; caller must already hold self._lock."""
+        self._ser.reset_input_buffer()
+        self._ser.write(b"M114\n")
+        logger.debug("TX  M114  (stepper counts)")
+
+        deadline = time.time() + self.config.timeout
+        while time.time() < deadline:
+            line = self._ser.readline().decode(errors="ignore").strip()
+            if not line:
+                continue
+            logger.debug("RX  %s", line)
+            m = re.search(r"Count\s+A:(-?\d+)\s+B:(-?\d+)", line)
+            if m:
+                a, b = int(m.group(1)), int(m.group(2))
+                spm = self.config.steps_per_mm_xy
+                return ((a + b) / 2.0 / spm, (a - b) / 2.0 / spm)
+        raise PrinterTimeoutError("M114 did not report stepper counts in time")
 
     def get_temperature(self) -> dict:
         """
@@ -327,8 +362,8 @@ class Printer:
         Does NOT send G28 — homing is done entirely via GPIO feedback.
 
         Default order (always X → Y → Z when axes is None / full home):
-            X_MIN (BCM 27)  seek G1 X-0.5, backoff X+
-            Y_MIN (BCM 17)  seek G1 Y-0.5, backoff Y+
+            X_MIN (BCM 27)  seek G1 X+0.5, backoff X-
+            Y_MIN (BCM 17)  seek G1 Y+0.5, backoff Y-
             Z_MIN (BCM 4)   seek G1 Z-0.5, backoff Z+
 
         Per-axis sequence:
@@ -352,22 +387,50 @@ class Printer:
 
         # Per-axis seek config: switch name, seek sign (+1 / -1), step, backoff
         # Seek sign is the firmware G1 direction toward the limit switch.
+        #
+        # SEEK DIRECTION IS NOT FREE TO CHOOSE. Buddy boots every axis at
+        # one END of its travel window (motion.cpp:131, current_position =
+        # {X_HOME_POS, Y_HOME_POS, Z_HOME_POS}) regardless of where the head
+        # physically is, and position_is_reachable() then silently drops any
+        # move that would leave the window:
+        #
+        #   X  boots 252 (X_MAX_POS)  = the RIGHT end
+        #   Y  boots -19 (Y_MIN_POS)  = the FRONT end
+        #   Z  boots   0 (Z_MIN_POS)
+        #
+        # The switches sit at exactly those ends, and park() leaves the head
+        # ON them before power-off. So at the next boot the head is already
+        # at the switch and homing never has to seek toward it — which it
+        # could not do anyway, since the firmware believes it is standing
+        # there and refuses any move further that way.
+        #
+        # Every move homing does make IS legal:
+        #   - backing off a pressed switch goes AWAY from the boot end, which
+        #     is the direction with the whole window of room available
+        #   - the re-approach then seeks back within the room just created
+        #
+        # Seeking toward a switch from an arbitrary position only works when
+        # headroom already exists, i.e. once the head has moved away from the
+        # boot end. That is the end-of-session case, which is what park()
+        # does. If power is lost mid-session the head will be stranded away
+        # from the switches; push it to the right-front corner by hand before
+        # powering on. The headroom probe below catches that case.
         axis_home_cfg: dict[str, dict] = {
             "X": {
                 "switch": "X_MIN",
-                "seek_sign": -1,   # G1 X-0.5 toward switch (front-left corner)
+                "seek_sign": +1,   # G1 X+0.5 -> RIGHT, switch on the right
                 "step_mm": 0.5,
                 "backoff_mm": 1.0,
             },
             "Y": {
                 "switch": "Y_MIN",
-                "seek_sign": -1,   # G1 Y-0.5 toward switch (front-left corner)
+                "seek_sign": -1,   # G1 Y-0.5 -> FRONT, switch at the front
                 "step_mm": 0.5,
                 "backoff_mm": 1.0,
             },
             "Z": {
                 "switch": "Z_MIN",
-                "seek_sign": -1,   # G1 Z-0.5 toward switch
+                "seek_sign": -1,   # toward Z_MIN, the boot end
                 "step_mm": 0.5,
                 "backoff_mm": 1.0,
             },
@@ -434,6 +497,62 @@ class Printer:
 
                     # True when already seated on the switch before this axis starts
                     already_at_switch = gpio_manager.is_triggered(switch_name)
+
+                    # ---- Headroom probe (only when NOT on the switch) ---
+                    # At every cold boot Buddy initialises position to the
+                    # BOTTOM of its travel window:
+                    #
+                    #   motion.cpp:131
+                    #   xyze_pos_t current_position =
+                    #       { X_HOME_POS, Y_HOME_POS, Z_HOME_POS };
+                    #
+                    # which for min-homed axes resolve to X_MIN_POS (-2)
+                    # and Y_MIN_POS (-19) — wherever the head physically
+                    # is. Our switches sit at that same minimum end, so a
+                    # seek is negative and the firmware has ZERO room to
+                    # give: every step is silently dropped by
+                    # position_is_reachable() while M114 counts down
+                    # anyway. One step checked against the STEPPER COUNTS
+                    # turns that silent no-op into a clear error.
+                    #
+                    # This only applies when the head is NOT already on
+                    # the switch. Starting ON the switch is the CORRECT
+                    # state: there the first move is a positive backoff,
+                    # which always has headroom, so probing negatively
+                    # here would fail a perfectly good setup.
+                    if not already_at_switch and axis in ("X", "Y"):
+                        idx = 0 if axis == "X" else 1
+                        probe_before = self._true_xy_locked()
+                        self._send_locked(
+                            f"G1 {axis}{seek_delta:+g} F{homing_feed}"
+                        )
+                        self._send_locked("M400")
+                        probe_after = self._true_xy_locked()
+
+                        moved = abs(probe_after[idx] - probe_before[idx])
+                        logger.info(
+                            "home: %s headroom probe moved %.3f mm (want ~%.2f)",
+                            axis, moved, step_mm,
+                        )
+                        if moved < step_mm * 0.5:
+                            raise RuntimeError(
+                                f"Homing blocked on {axis}: commanded "
+                                f"{seek_delta:+g} mm but the steppers moved only "
+                                f"{moved:.3f} mm — the firmware accepted the "
+                                f"command and refused the motion.\n"
+                                f"The head is not on {switch_name}, and {axis} "
+                                f"boots pinned against the very end the switch "
+                                f"sits at — so the firmware believes it is "
+                                f"already there and refuses to travel further "
+                                f"that way. Homing cannot seek from here.\n"
+                                f"This means the last session did not finish "
+                                f"with park() (power loss, or the head was "
+                                f"moved while off).\n"
+                                f"Fix: power OFF, push the head into the "
+                                f"RIGHT-FRONT corner by hand until the switches "
+                                f"click, then power on and home again. Calling "
+                                f"park() before every shutdown avoids this."
+                            )
 
                     # If already on the switch, move away until it releases so the
                     # following seek is a full approach (X is never "invisible").
@@ -526,6 +645,113 @@ class Printer:
                 "axes":    to_home,
                 "results": results,
             }
+
+    def park(self, max_travel_mm: float = 300.0) -> dict:
+        """
+        Drive X and Y onto their limit switches and LEAVE the head there.
+        Call this at the end of every session, before powering down.
+
+        This is the operation the whole setup depends on.
+
+        Buddy assigns current_position = {X_HOME_POS, Y_HOME_POS, Z_HOME_POS}
+        at every cold boot — for this machine X_MAX_POS (252, right) and
+        Y_MIN_POS (-19, front) — no matter where the head really is. Nothing
+        over serial can correct that afterwards: G92 only shifts the workspace
+        offset (G92.cpp does `position_shift[i] += d` for X/Y/Z and leaves
+        native position alone), and the clamp that enforces travel reads the
+        raw compile-time macros. Homing state does not survive either; it
+        lives in RAM and is gone at power-off.
+
+        So the ONLY thing that carries across a power cycle is where the head
+        physically is. Parking it on the switches — which sit at exactly the
+        coordinates the firmware will assume — makes that assumption true, and
+        does it to switch precision rather than however hard someone pushed the
+        head into a corner by hand.
+
+        Unlike home(), this does NOT back off at the end. The head is meant to
+        stay pressed on the switches so the next boot starts there.
+
+        Seeking here is legal because by now the head has moved away from the
+        boot end during the session, so headroom toward the switches exists.
+        That is not true at boot, which is why home() cannot seek and park()
+        can.
+        """
+        import gpio_manager
+
+        # Same ends the firmware boots at: X -> right (X_MAX), Y -> front (Y_MIN)
+        park_cfg = (("X", "X_MIN", +1), ("Y", "Y_MIN", -1))
+        park_feed = 1500
+        step_mm = 1.0
+
+        logger.info("park: seeking limit switches to set up the next boot")
+
+        with self._lock:
+            self._require_connected()
+
+            if not gpio_manager.gpio_available():
+                raise RuntimeError(
+                    "GPIO not available — cannot park without limit switches."
+                )
+
+            self._ser.reset_input_buffer()
+            self._send_locked("G91")   # relative
+            results: dict[str, dict] = {}
+
+            try:
+                for axis, switch_name, seek_sign in park_cfg:
+                    idx = 0 if axis == "X" else 1
+                    delta = seek_sign * step_mm
+
+                    if gpio_manager.is_triggered(switch_name):
+                        logger.info(
+                            "park: %s already resting on %s", axis, switch_name
+                        )
+                        results[axis] = {"switch": switch_name,
+                                         "already_parked": True,
+                                         "reached_switch": True,
+                                         "travelled_mm": 0.0}
+                        continue
+
+                    start = self._true_xy_locked()
+                    reached = False
+
+                    for _ in range(int(max_travel_mm / step_mm)):
+                        self._send_locked(f"G1 {axis}{delta:+g} F{park_feed}")
+                        self._send_locked("M400")
+                        if gpio_manager.is_triggered(switch_name):
+                            reached = True
+                            break
+
+                    end = self._true_xy_locked()
+                    travelled = abs(end[idx] - start[idx])
+
+                    if reached:
+                        logger.info(
+                            "park: %s parked on %s after %.1f mm",
+                            axis, switch_name, travelled,
+                        )
+                    else:
+                        logger.warning(
+                            "park: %s never reached %s — only %.1f mm of real "
+                            "travel. The next boot will NOT be aligned.",
+                            axis, switch_name, travelled,
+                        )
+
+                    results[axis] = {"switch": switch_name,
+                                     "already_parked": False,
+                                     "reached_switch": reached,
+                                     "travelled_mm": round(travelled, 2)}
+            finally:
+                self._send_locked("G90")   # restore absolute
+
+        parked = all(r["reached_switch"] for r in results.values())
+        logger.info("park: complete  parked=%s", parked)
+        if not parked:
+            logger.warning(
+                "park: INCOMPLETE — push the head into the right-front corner "
+                "by hand before powering on, or the next session cannot home."
+            )
+        return {"parked": parked, "results": results}
 
     def emergency_stop(self) -> None:
         """Send M112 (firmware emergency stop — requires printer reset)."""
