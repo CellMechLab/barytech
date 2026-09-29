@@ -34,6 +34,19 @@ class PrinterTimeoutError(RuntimeError):
     """Raised when the printer does not reply 'ok' within the deadline."""
 
 
+class _SeekStalled(Exception):
+    """
+    Internal: a homing seek stopped producing motion.
+
+    Signals that the firmware is discarding the moves — the axis has run out
+    of travel window in the seek direction — rather than that the switch or
+    its wiring is faulty. Carries the millimetres commanded before the stall.
+    """
+    def __init__(self, travelled_mm: float):
+        super().__init__(f"seek stalled after {travelled_mm:.1f} mm commanded")
+        self.travelled_mm = travelled_mm
+
+
 # ---------------------------------------------------------------------------
 # Data containers
 # ---------------------------------------------------------------------------
@@ -546,6 +559,12 @@ class Printer:
                     # One coarse step, used by the headroom probe below
                     step_mm = coarse_step_mm
                     seek_delta = seek_sign * step_mm
+                    # Index into the (x, y) tuple from _true_xy_locked().
+                    # Only X and Y can be verified that way — the CoreXY
+                    # transform reads the A/B motor counts, and Z is not part
+                    # of it — so Z runs without the stall watch.
+                    idx = 0 if axis == "X" else 1
+                    can_stall_check = axis in ("X", "Y")
 
                     def seek(step: float, feed: int, label: str) -> float:
                         """
@@ -558,6 +577,20 @@ class Printer:
                         """
                         d = seek_sign * step
                         travelled = 0.0
+                        # Stall watch. The one-shot headroom probe above can
+                        # pass on a couple of millimetres of slack and then
+                        # the axis runs out mid-seek, at which point every
+                        # further G1 is silently discarded. Without this the
+                        # loop grinds out the whole max_seek_mm budget and
+                        # blames the wiring, when the real cause is no
+                        # headroom. Re-check the true position periodically
+                        # and stop as soon as the steppers stop responding.
+                        check_every = 5
+                        last_true = (
+                            self._true_xy_locked()[idx] if can_stall_check else 0.0
+                        )
+                        since_check = 0
+
                         for _ in range(int(max_seek_mm / step)):
                             self._send_locked(f"G1 {axis}{d:+g} F{feed}")
                             # M400 blocks until the motor has physically stopped
@@ -569,6 +602,22 @@ class Printer:
                                     switch_name, label, travelled,
                                 )
                                 return travelled
+
+                            since_check += 1
+                            if can_stall_check and since_check >= check_every:
+                                now_true = self._true_xy_locked()[idx]
+                                expected = step * check_every * 0.5
+                                if abs(now_true - last_true) < expected:
+                                    logger.warning(
+                                        "home: %s stalled — commanded %.1f mm "
+                                        "but the steppers moved %.3f mm; "
+                                        "giving up on this pass",
+                                        axis, step * check_every,
+                                        abs(now_true - last_true),
+                                    )
+                                    raise _SeekStalled(travelled)
+                                last_true = now_true
+                                since_check = 0
                         return travelled
 
                     logger.info(
@@ -668,7 +717,33 @@ class Printer:
                             )
 
                     # ---- Pass 1: coarse and fast -----------------------
-                    coarse_mm = seek(coarse_step_mm, coarse_feed, "coarse")
+                    try:
+                        coarse_mm = seek(coarse_step_mm, coarse_feed, "coarse")
+                    except _SeekStalled as stall:
+                        # The axis ran out of travel window mid-seek. This is
+                        # the same root cause the headroom probe catches, just
+                        # discovered later — report it as such rather than
+                        # letting the generic "never tripped" message blame
+                        # the wiring.
+                        msg = (
+                            f"{axis} ran out of travel after "
+                            f"{stall.travelled_mm:.1f} mm: the firmware stopped "
+                            f"executing moves toward {switch_name}. {axis} boots "
+                            f"pinned against the end the switch sits at, so once "
+                            f"the initial slack is used up nothing more happens. "
+                            f"Push the head into the RIGHT-FRONT corner by hand "
+                            f"with the power off, then home again (park() before "
+                            f"shutdown prevents this)."
+                        )
+                        logger.warning("home: %s", msg)
+                        results[axis] = {
+                            "switch":         switch_name,
+                            "reached_switch": False,
+                            "coarse_mm":      round(stall.travelled_mm, 3),
+                            "error":          msg,
+                        }
+                        continue
+
                     if not self._switch_triggered(gpio_manager, switch_name):
                         msg = (
                             f"{switch_name} never tripped in {coarse_mm:.1f} mm "
