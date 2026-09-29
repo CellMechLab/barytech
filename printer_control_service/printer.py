@@ -374,6 +374,13 @@ class Printer:
             3. Read GPIO — if switch is LOW (triggered), stop immediately
             4. Back off opposite direction so the switch opens again
 
+        Seeking is two-pass, as firmware homing does: a fast COARSE pass at
+        coarse_step_mm, a retract of rehome_backoff_mm to release the switch,
+        then a slow FINE pass at fine_step_mm. GPIO is polled between steps,
+        so a single-pass seek is only accurate to one step — the fine pass is
+        what makes the reference repeatable. The roller levers tolerate the
+        coarse overshoot.
+
         M400 is critical: Marlin's 'ok' for G1 only means the command was
         enqueued, not that the motor stopped.
 
@@ -381,7 +388,7 @@ class Printer:
         requested axes still follows X → Y → Z.
 
         Returns a dict with per-axis homing results.
-        Raises RuntimeError if any switch is never triggered within max_steps.
+        Raises RuntimeError if any switch is never triggered within max_seek_mm.
         """
         import gpio_manager
 
@@ -418,31 +425,42 @@ class Printer:
         axis_home_cfg: dict[str, dict] = {
             "X": {
                 "switch": "X_MIN",
-                "seek_sign": +1,   # G1 X+0.5 -> RIGHT, switch on the right
-                "step_mm": 0.5,
-                "backoff_mm": 1.0,
+                "seek_sign": +1,   # RIGHT, switch on the right
+                "coarse_step_mm": 2.0,
+                "fine_step_mm": 0.1,
+                "backoff_mm": 3.0,
             },
             "Y": {
                 "switch": "Y_MIN",
-                "seek_sign": -1,   # G1 Y-0.5 -> FRONT, switch at the front
-                "step_mm": 0.5,
-                "backoff_mm": 1.0,
+                "seek_sign": -1,   # FRONT, switch at the front
+                "coarse_step_mm": 2.0,
+                "fine_step_mm": 0.1,
+                "backoff_mm": 3.0,
             },
             "Z": {
                 "switch": "Z_MIN",
+                # Coarse step matches X/Y at 2.0 mm by request. Note this
+                # is the one axis where a coarse overshoot moves the head
+                # toward the bed rather than just squashing a lever, so the
+                # fine step stays small to keep the final reference tight.
                 "seek_sign": -1,   # toward Z_MIN, the boot end
-                "step_mm": 0.5,
+                "coarse_step_mm": 2.0,
+                "fine_step_mm": 0.05,
                 "backoff_mm": 1.0,
             },
         }
         # Fixed home order regardless of caller request list
         home_order = ("X", "Y", "Z")
         # Slow feed rate for safe approach (mm/min)
-        homing_feed = 600
+        homing_feed = 300          # fine pass — slow, for a crisp trigger
+        coarse_feed = 1500         # coarse pass — lever absorbs the overshoot
         # Safety cutoff (~300 mm max travel at 0.5 mm/step)
-        max_steps = 600
+        max_seek_mm = 300.0        # travel budget, valid at any step size
         # Max steps while backing off a switch that was already pressed
         max_backoff_steps = 40
+        # Retract between coarse and fine so the fine pass is a real approach.
+        # Must exceed coarse_step_mm or the switch may still be held.
+        rehome_backoff_mm = 4.0
 
         if axes:
             requested = {a.upper() for a in axes}
@@ -482,17 +500,44 @@ class Printer:
                 for axis in to_home:
                     cfg = axis_home_cfg[axis]
                     switch_name = cfg["switch"]
-                    step_mm = float(cfg["step_mm"])
+                    coarse_step_mm = float(cfg["coarse_step_mm"])
+                    fine_step_mm = float(cfg["fine_step_mm"])
                     backoff_mm = float(cfg["backoff_mm"])
                     seek_sign = int(cfg["seek_sign"])
                     # Opposite of seek — used to leave the switch
                     backoff_sign = -seek_sign
-                    seek_delta = seek_sign * step_mm
                     backoff_delta = backoff_sign * backoff_mm
+                    # One coarse step, used by the headroom probe below
+                    step_mm = coarse_step_mm
+                    seek_delta = seek_sign * step_mm
+
+                    def seek(step: float, feed: int, label: str) -> float:
+                        """
+                        Jog toward the switch in *step* mm increments until it
+                        trips. Returns millimetres travelled.
+
+                        GPIO is polled BETWEEN steps, so the head can overrun
+                        the true trigger point by up to one step — which is
+                        exactly why a coarse pass is followed by a fine one.
+                        """
+                        d = seek_sign * step
+                        travelled = 0.0
+                        for _ in range(int(max_seek_mm / step)):
+                            self._send_locked(f"G1 {axis}{d:+g} F{feed}")
+                            # M400 blocks until the motor has physically stopped
+                            self._send_locked("M400")
+                            travelled += step
+                            if gpio_manager.is_triggered(switch_name):
+                                logger.info(
+                                    "home: %s %s pass tripped after %.2f mm",
+                                    switch_name, label, travelled,
+                                )
+                                return travelled
+                        return travelled
 
                     logger.info(
-                        "========== HOMING AXIS %s  switch=%s  seek=%+.1f ==========",
-                        axis, switch_name, seek_delta,
+                        "========== HOMING AXIS %s  switch=%s  coarse=%.1f fine=%.2f ==========",
+                        axis, switch_name, coarse_step_mm, fine_step_mm,
                     )
 
                     # True when already seated on the switch before this axis starts
@@ -582,29 +627,43 @@ class Printer:
                                 f"Check wiring / stuck switch."
                             )
 
-                    steps_taken = 0
-                    for _ in range(max_steps):
-                        # Jog one step toward the limit switch.
-                        self._send_locked(
-                            f"G1 {axis}{seek_delta:+g} F{homing_feed}"
-                        )
-                        # M400 waits until the motor has physically stopped.
-                        self._send_locked("M400")
-                        steps_taken += 1
-
-                        if gpio_manager.is_triggered(switch_name):
-                            logger.info(
-                                "home: %s triggered after %d step(s) (%.1f mm)",
-                                switch_name, steps_taken, steps_taken * step_mm,
-                            )
-                            break
-
+                    # ---- Pass 1: coarse and fast -----------------------
+                    coarse_mm = seek(coarse_step_mm, coarse_feed, "coarse")
                     if not gpio_manager.is_triggered(switch_name):
                         raise RuntimeError(
                             f"Homing failed: {switch_name} not triggered after "
-                            f"{steps_taken} step(s) of {step_mm} mm on "
-                            f"{axis}{'+' if seek_sign > 0 else '-'} axis. "
-                            f"Check wiring or increase max_steps."
+                            f"{coarse_mm:.1f} mm of coarse seek on "
+                            f"{axis}{'+' if seek_sign > 0 else '-'}. "
+                            f"Check wiring, or raise max_seek_mm."
+                        )
+
+                    # ---- Retract clear of the switch -------------------
+                    # The fine pass must start from a released state so the
+                    # point it finds is a genuine approach, not wherever the
+                    # coarse pass happened to overshoot to.
+                    logger.info(
+                        "home: retracting %+.1f mm before the fine pass on %s",
+                        backoff_sign * rehome_backoff_mm, axis,
+                    )
+                    self._send_locked(
+                        f"G1 {axis}{backoff_sign * rehome_backoff_mm:+g} "
+                        f"F{homing_feed}"
+                    )
+                    self._send_locked("M400")
+                    if gpio_manager.is_triggered(switch_name):
+                        raise RuntimeError(
+                            f"Homing failed: {switch_name} still held after a "
+                            f"{rehome_backoff_mm} mm retract on {axis}. Raise "
+                            f"rehome_backoff_mm, or the lever is sticking."
+                        )
+
+                    # ---- Pass 2: fine and slow — this is the reference --
+                    fine_mm = seek(fine_step_mm, homing_feed, "fine")
+                    if not gpio_manager.is_triggered(switch_name):
+                        raise RuntimeError(
+                            f"Homing failed: {switch_name} did not re-trigger "
+                            f"during the fine pass after {fine_mm:.2f} mm on "
+                            f"{axis}. Switch may be intermittent."
                         )
 
                     # Final retract so the pin is no longer grounded.
@@ -629,9 +688,11 @@ class Printer:
                     results[axis] = {
                         "switch":            switch_name,
                         "reached_switch":    True,
-                        "steps":             steps_taken,
-                        "distance_mm":       round(steps_taken * step_mm, 3),
-                        "seek_delta_mm":     seek_delta,
+                        "coarse_mm":         round(coarse_mm, 3),
+                        "fine_mm":            round(fine_mm, 3),
+                        "coarse_step_mm":    coarse_step_mm,
+                        "fine_step_mm":      fine_step_mm,
+                        "seek_sign":         seek_sign,
                         "backoff_mm":        backoff_mm,
                         "switch_released":   switch_released,
                         "already_at_switch": already_at_switch,
