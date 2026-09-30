@@ -143,8 +143,8 @@ try:
                 "displacement": DISPLACEMENT_SIGN * depth_nm * NM_TO_M,  # m
                 "force": force_uN * UN_TO_N,                             # N
                 "timestamp": timestamp,
-                "device_id": "TsmfTUI5FCAf",
-                "device_token": "q23GeDPV02xybXxT",
+                "device_id": "Qz2f4BuKsdcW",
+                "device_token": "2iUnGOCh0w63eOWG",
             }
 
             # Use retain=False for streaming telemetry
