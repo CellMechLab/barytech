@@ -9,6 +9,7 @@ Features
 • Polling-based watcher (same stability guard as hdf5_watcher.py)
 • Per-file retry with exponential back-off (survives network blips)
 • Local SQLite ledger — never re-uploads a file across restarts
+• Caps each file at MAX_RETRIES POSTs, then abandons it permanently
 • Streams the file body so large HDF5 files don't load into RAM
 • API-key authentication (X-Api-Key header)
 
@@ -74,11 +75,12 @@ RETRY_BASE_SECS = 2.0    # doubles each attempt: 2, 4, 8, 16, 32 s
 UPLOAD_TIMEOUT  = 120.0  # seconds — raise for very large files
 
 # ---------------------------------------------------------------------------
-# Local SQLite ledger (tracks uploaded files so we never re-upload)
+# Local SQLite ledger (tracks uploaded / abandoned files so we never re-upload)
 # ---------------------------------------------------------------------------
 
 class Ledger:
     def __init__(self, db_path: str = LEDGER_DB):
+        # Shared connection used by the agent thread for upload bookkeeping.
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS uploaded (
@@ -86,73 +88,138 @@ class Ledger:
                 uploaded_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        # Stores per-file POST attempt counts and permanent abandon state.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS upload_attempts (
+                abs_path TEXT PRIMARY KEY,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                abandoned INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         self._conn.commit()
 
-    def is_uploaded(self, path: Path) -> bool:
+    def _key(self, path: Path) -> str:
+        # Normalizes paths so ledger lookups stay stable across restarts.
+        return str(path.resolve())
+
+    def is_done(self, path: Path) -> bool:
+        # True when the file was uploaded successfully or abandoned after MAX_RETRIES.
+        key = self._key(path)
         cur = self._conn.execute(
-            "SELECT 1 FROM uploaded WHERE abs_path = ?", (str(path.resolve()),)
+            "SELECT 1 FROM uploaded WHERE abs_path = ?", (key,)
+        )
+        if cur.fetchone() is not None:
+            return True
+        cur = self._conn.execute(
+            "SELECT 1 FROM upload_attempts WHERE abs_path = ? AND abandoned = 1",
+            (key,),
         )
         return cur.fetchone() is not None
 
+    def get_attempts(self, path: Path) -> int:
+        # Returns how many failed POSTs have already been recorded for this file.
+        cur = self._conn.execute(
+            "SELECT attempts FROM upload_attempts WHERE abs_path = ?",
+            (self._key(path),),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
     def mark_uploaded(self, path: Path) -> None:
+        # Records a successful ingest so the file is never POSTed again.
+        key = self._key(path)
         self._conn.execute(
             "INSERT OR IGNORE INTO uploaded (abs_path) VALUES (?)",
-            (str(path.resolve()),),
+            (key,),
+        )
+        self._conn.execute(
+            "DELETE FROM upload_attempts WHERE abs_path = ?",
+            (key,),
         )
         self._conn.commit()
 
+    def record_failure(self, path: Path, error: str) -> int:
+        """
+        Increment the failed-POST counter for path.
+        Returns the new attempt count; marks abandoned when MAX_RETRIES is reached.
+        """
+        key = self._key(path)
+        attempts = self.get_attempts(path) + 1
+        # True once this file has exhausted its allowed POST budget.
+        abandoned = 1 if attempts >= MAX_RETRIES else 0
+        self._conn.execute(
+            """
+            INSERT INTO upload_attempts (abs_path, attempts, abandoned, last_error, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(abs_path) DO UPDATE SET
+                attempts = excluded.attempts,
+                abandoned = excluded.abandoned,
+                last_error = excluded.last_error,
+                updated_at = datetime('now')
+            """,
+            (key, attempts, abandoned, error[:500]),
+        )
+        self._conn.commit()
+        return attempts
+
 
 # ---------------------------------------------------------------------------
-# Upload a single file with retry
+# Upload a single file — one POST per call (caller owns the 5-attempt budget)
 # ---------------------------------------------------------------------------
 
-def upload_file(path: Path, client: httpx.Client) -> bool:
+def upload_file(path: Path, client: httpx.Client, attempt: int) -> bool:
     """
-    POST the file to Device B's /hdf5/ingest endpoint.
-    Returns True on success, False after all retries exhausted.
+    POST the file to Device B's /hdf5/ingest endpoint once.
+    Returns True on HTTP 200, False on rejection or network error.
 
     Uses httpx streaming so the file is never fully loaded into memory.
     """
+    # Builds the Device B ingest URL from the configured cloud base URL.
     url = f"{DEVICE_B_URL.rstrip('/')}/hdf5/ingest"
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            log.info("Uploading  file=%s  attempt=%d/%d", path.name, attempt, MAX_RETRIES)
-            with open(path, "rb") as fh:
-                response = client.post(
-                    url,
-                    content=fh,                       # streamed — no RAM spike
-                    headers={
-                        "X-Api-Key":      API_KEY,
-                        "X-Filename":     path.name,
-                        "Content-Type":   "application/octet-stream",
-                    },
-                    timeout=UPLOAD_TIMEOUT,
-                )
-            if response.status_code == 200:
-                log.info("Upload OK  file=%s  response=%s", path.name, response.json())
-                return True
-            else:
-                log.warning(
-                    "Upload rejected  file=%s  status=%d  body=%s",
-                    path.name, response.status_code, response.text[:200],
-                )
-                # 4xx = bad request, don't retry (it will keep failing)
-                if 400 <= response.status_code < 500:
-                    return False
+    try:
+        log.info("Uploading  file=%s  attempt=%d/%d", path.name, attempt, MAX_RETRIES)
+        with open(path, "rb") as fh:
+            response = client.post(
+                url,
+                content=fh,                       # streamed — no RAM spike
+                headers={
+                    "X-Api-Key":      API_KEY,
+                    "X-Filename":     path.name,
+                    "Content-Type":   "application/octet-stream",
+                },
+                timeout=UPLOAD_TIMEOUT,
+            )
+        if response.status_code == 200:
+            log.info("Upload OK  file=%s  response=%s", path.name, response.json())
+            return True
 
-        except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as exc:
-            log.warning("Network error  attempt=%d  error=%s", attempt, exc)
-        except Exception:
-            log.exception("Unexpected error uploading %s", path)
+        log.warning(
+            "Upload rejected  file=%s  status=%d  body=%s",
+            path.name, response.status_code, response.text[:200],
+        )
+        # Stores the rejection body so the ledger can record why this attempt failed.
+        upload_file.last_error = (
+            f"HTTP {response.status_code}: {response.text[:200]}"
+        )
+        return False
 
-        if attempt < MAX_RETRIES:
-            wait = RETRY_BASE_SECS * (2 ** (attempt - 1))
-            log.info("Retrying in %.0f s …", wait)
-            time.sleep(wait)
+    except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as exc:
+        log.warning("Network error  attempt=%d  error=%s", attempt, exc)
+        # Stores the network failure reason for the ledger.
+        upload_file.last_error = f"network: {exc}"
+        return False
+    except Exception as exc:
+        # Prevent crash on unexpected upload failures; record and return False.
+        log.exception("Unexpected error uploading %s", path)
+        upload_file.last_error = f"unexpected: {exc}"
+        return False
 
-    log.error("Giving up on %s after %d attempts", path.name, MAX_RETRIES)
-    return False
+
+# Holds the most recent upload failure reason for the caller to persist.
+upload_file.last_error = "unknown error"
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +299,8 @@ def main() -> None:
             except Exception as exc:
                 log.warning("glob error: %s", exc)
 
-        new_files = [p for p in candidates if not ledger.is_uploaded(p)]
+        # Skips files already uploaded successfully or abandoned after MAX_RETRIES.
+        new_files = [p for p in candidates if not ledger.is_done(p)]
 
         for path in new_files:
             if stop_event.is_set():
@@ -242,12 +310,33 @@ def main() -> None:
                 log.debug("File still being written — skipping  file=%s", path.name)
                 continue
 
-            if ledger.is_uploaded(path):
+            if ledger.is_done(path):
                 continue    # another iteration may have got it
 
-            ok = upload_file(path, client)
+            # Next POST number for this file (1-based), capped by MAX_RETRIES.
+            attempt_number = ledger.get_attempts(path) + 1
+            ok = upload_file(path, client, attempt_number)
             if ok:
                 ledger.mark_uploaded(path)
+                continue
+
+            # Persists the failure; abandons the file once the 5-POST budget is used.
+            attempts = ledger.record_failure(
+                path, getattr(upload_file, "last_error", "unknown error")
+            )
+            if attempts >= MAX_RETRIES:
+                log.error(
+                    "Giving up on %s after %d failed POSTs — will not retry",
+                    path.name, attempts,
+                )
+            else:
+                wait = RETRY_BASE_SECS * (2 ** (attempts - 1))
+                log.info(
+                    "Will retry %s later  failed=%d/%d  backoff=%.0fs",
+                    path.name, attempts, MAX_RETRIES, wait,
+                )
+                # Brief backoff before the next poll cycle can pick this file again.
+                stop_event.wait(timeout=wait)
 
         if not stop_event.is_set():
             time.sleep(POLL_INTERVAL)
@@ -257,4 +346,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()# placeholder — will be replaced below
+    main()
