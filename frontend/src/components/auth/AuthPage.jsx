@@ -93,8 +93,31 @@ const AuthPage = () => {
         const result = await response.json();
         console.log("Registration successful:", result);
 
-        // Set the user in context after registration
-        login({ username: data.username }); // Store the username or any relevant user data
+        // Auto-login after register so sessionStorage gets a JWT (folder APIs require it).
+        // Without this, the UI is "logged in" but Bearer auth fails until a manual login.
+        const tokenResponse = await fetch(buildBackendUrl("/token"), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({
+            username: data.username,
+            password: data.password,
+          }),
+        });
+
+        if (!tokenResponse.ok) {
+          const tokenError = await tokenResponse.json();
+          console.error("Auto-login after registration failed:", tokenError);
+          // Fall back to login screen so the user can authenticate manually.
+          setIsLogin(true);
+          return;
+        }
+
+        const tokenResult = await tokenResponse.json();
+        // Persist the same authToken key used by FolderSelector and other protected calls.
+        sessionStorage.setItem("authToken", tokenResult.access_token);
+        login({ username: data.username, user_id: tokenResult.user_id });
 
         navigate("/"); // Redirect to dashboard or home
       } else {
