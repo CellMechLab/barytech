@@ -14,84 +14,60 @@ topic = "MON"
 def on_connect(client, userdata, flags, rc):
     print("Connected with result code:", rc)
 
-# CLI argument validation.
-# points_per_batch           — how many MQTT publishes to send per second (throttling).
-# points_per_curve           — samples split between the indent (phase=0) and retract
-#                              (phase=1) legs of a single curve (motor_working=1 throughout).
-# num_curves                 — how many full curves to simulate back-to-back (default 1).
-# idle_points_between_curves — motor_working=0 samples sent after each curve to trigger
-#                              the backend's 1->0 "motor stopped" curve-flush boundary
-#                              (default 20). Set to 0 to reproduce the old behaviour.
-# delay_points_per_curve     — samples sent between indent and retract with phase=2
-#                              (delay/dwell hold) and motor_working still 1 (default 20).
-#                              Set to 0 to skip the delay leg.
-if len(sys.argv) not in (3, 4, 5, 6):
-    print(
-        "Usage: python publisher.py <points_per_batch> <points_per_curve> "
-        "[num_curves=1] [idle_points_between_curves=20] [delay_points_per_curve=20]"
-    )
+# CLI argument validation
+# points_per_batch  — messages published per second
+# total_points      — total messages to send (curves are streamed back-to-back)
+# points_per_curve  — optional, samples per full curve (indent + retract), default 200
+if len(sys.argv) not in (3, 4):
+    print("Usage: python publisher.py <points_per_batch> <total_points> [points_per_curve=200]")
     sys.exit(1)
 
 try:
     points_per_batch = int(sys.argv[1])
-    points_per_curve = int(sys.argv[2])
-    num_curves = int(sys.argv[3]) if len(sys.argv) >= 4 else 1
-    idle_points_between_curves = int(sys.argv[4]) if len(sys.argv) >= 5 else 20
-    delay_points_per_curve = int(sys.argv[5]) if len(sys.argv) >= 6 else 20
+    total_points = int(sys.argv[2])
+    points_per_curve = int(sys.argv[3]) if len(sys.argv) == 4 else 200
 except ValueError:
     print("Error: arguments must be integers.")
     sys.exit(1)
 
-if (
-    points_per_batch <= 0
-    or points_per_curve <= 0
-    or num_curves <= 0
-    or idle_points_between_curves < 0
-    or delay_points_per_curve < 0
-):
-    print(
-        "Error: points_per_batch, points_per_curve, num_curves must be positive; "
-        "idle_points_between_curves and delay_points_per_curve must be >= 0."
-    )
+if points_per_batch <= 0 or total_points <= 0 or points_per_curve < 2:
+    print("Error: arguments must be positive integers (points_per_curve >= 2).")
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
 # Curve model — tuned to the "0.2 kPa hydrogel" reference plot:
 #   depth 0 -> ~72 nm, force ~0.7 uN -> ~8.3 uN, power-law loading,
-#   ~5% curve-to-curve CV, noise growing with depth, small contact bump ~8-10 nm.
-# Internally everything is in nm / uN; converted to mm / mN (MQTT source units)
-# only when publishing.
+#   ~5% curve-to-curve CV, noise growing with depth, small kink ~8-10 nm.
+# Internally nm / uN; published in SI (m / N), same as the original script.
 # ---------------------------------------------------------------------------
-DISPLACEMENT_SIGN = -1          # device reports indentation as negative mm; set 1 for positive
+DISPLACEMENT_SIGN = -1          # original script sent negative displacement; set 1 for positive
+INCLUDE_RETRACT = True          # False -> only loading legs (exactly what the plot shows)
 
-MAX_DEPTH_NM = 72.0             # mean max indentation depth
-MAX_DEPTH_SD_NM = 2.0           # curve-to-curve spread of max depth
-BASELINE_FORCE_UN = 0.7         # force at contact (d = 0)
+MAX_DEPTH_NM = 72.0
+MAX_DEPTH_SD_NM = 2.0
+BASELINE_FORCE_UN = 0.7
 BASELINE_FORCE_SD_UN = 0.02
-FORCE_AT_MAX_UN = 8.3           # mean force at MAX_DEPTH_NM
-POWER_EXPONENT = 2.5            # F - F0 ~ d^n (fitted to the plot's shape)
-CURVE_CV = 0.05                 # stiffness spread between curves (~5% CV)
+FORCE_AT_MAX_UN = 8.3
+POWER_EXPONENT = 2.5            # F - F0 ~ d^n
+CURVE_CV = 0.05                 # stiffness spread between curves
 
 NOISE_FLOOR_UN = 0.02           # noise SD near contact
 NOISE_AT_MAX_UN = 0.35          # noise SD at max depth
-NOISE_EXPONENT = 3.0            # how sharply noise grows with depth
+NOISE_EXPONENT = 3.0
 
-CONTACT_BUMP_NM = 8.5           # small kink seen around 8-10 nm
+CONTACT_BUMP_NM = 8.5
 CONTACT_BUMP_WIDTH_NM = 1.5
 CONTACT_BUMP_UN = 0.04
 
-RELAXATION_FRACTION = 0.06      # force drop during dwell (viscoelastic relaxation)
-RELAXATION_TAU_FRACTION = 0.3   # relaxation time constant as fraction of dwell length
-RESIDUAL_DEPTH_FRACTION = 0.15  # on retract, force returns to baseline at this depth fraction
+RESIDUAL_DEPTH_FRACTION = 0.15  # on retract, force is back to baseline at this depth fraction
 UNLOAD_EXPONENT = 1.8
 
-NM_TO_MM = 1e-6
-UN_TO_MN = 1e-3
+NM_TO_M = 1e-9
+UN_TO_N = 1e-6
 K_MEAN = (FORCE_AT_MAX_UN - BASELINE_FORCE_UN) / MAX_DEPTH_NM ** POWER_EXPONENT
 
 
 def make_curve_params():
-    """Random per-curve parameters so repeated curves scatter like real measurements."""
     return {
         "max_depth": max(1.0, random.gauss(MAX_DEPTH_NM, MAX_DEPTH_SD_NM)),
         "f0": random.gauss(BASELINE_FORCE_UN, BASELINE_FORCE_SD_UN),
@@ -100,9 +76,17 @@ def make_curve_params():
 
 
 def loading_force(d, p):
-    """Noise-free loading force (uN) at depth d (nm)."""
     bump = CONTACT_BUMP_UN * math.exp(-0.5 * ((d - CONTACT_BUMP_NM) / CONTACT_BUMP_WIDTH_NM) ** 2)
     return p["f0"] + p["k"] * max(d, 0.0) ** POWER_EXPONENT + bump
+
+
+def unloading_force(d, p):
+    d_max = p["max_depth"]
+    d_res = RESIDUAL_DEPTH_FRACTION * d_max
+    if d <= d_res:
+        return p["f0"]
+    f_peak = loading_force(d_max, p)
+    return p["f0"] + (f_peak - p["f0"]) * ((d - d_res) / (d_max - d_res)) ** UNLOAD_EXPONENT
 
 
 def noise(d, p):
@@ -111,50 +95,26 @@ def noise(d, p):
     return random.gauss(0.0, sd)
 
 
-def ramp(n, start, end):
-    if n <= 0:
-        return []
-    if n == 1:
-        return [end]
-    return [start + (end - start) * i / (n - 1) for i in range(n)]
+def curve_samples():
+    """One full curve as a list of (depth_nm, force_uN)."""
+    p = make_curve_params()
+    n_indent = points_per_curve // 2 if INCLUDE_RETRACT else points_per_curve
+    n_retract = points_per_curve - n_indent if INCLUDE_RETRACT else 0
 
-
-def indent_samples(n, p):
-    return [(d, loading_force(d, p) + noise(d, p)) for d in ramp(n, 0.0, p["max_depth"])]
-
-
-def delay_samples(n, p):
-    d = p["max_depth"]
-    f_peak = loading_force(d, p)
-    drop = RELAXATION_FRACTION * (f_peak - p["f0"])
-    tau = max(1.0, RELAXATION_TAU_FRACTION * n)
-    return [(d, f_peak - drop * (1 - math.exp(-i / tau)) + noise(d, p)) for i in range(n)]
-
-
-def relaxed_peak(p, had_delay):
-    f_peak = loading_force(p["max_depth"], p)
-    if not had_delay:
-        return f_peak
-    tau = max(1.0, RELAXATION_TAU_FRACTION * delay_points_per_curve)
-    return f_peak - RELAXATION_FRACTION * (f_peak - p["f0"]) * (1 - math.exp(-delay_points_per_curve / tau))
-
-
-def retract_samples(n, p, had_delay):
-    d_max = p["max_depth"]
-    d_res = RESIDUAL_DEPTH_FRACTION * d_max
-    f_start = relaxed_peak(p, had_delay)
     out = []
-    for d in ramp(n, d_max, 0.0):
-        if d <= d_res:
-            f = p["f0"]
-        else:
-            f = p["f0"] + (f_start - p["f0"]) * ((d - d_res) / (d_max - d_res)) ** UNLOAD_EXPONENT
-        out.append((d, f + noise(d, p)))
+    for i in range(n_indent):
+        d = p["max_depth"] * i / max(1, n_indent - 1)
+        out.append((d, loading_force(d, p) + noise(d, p)))
+    for i in range(n_retract):
+        d = p["max_depth"] * (1 - (i + 1) / n_retract)
+        out.append((d, unloading_force(d, p) + noise(d, p)))
     return out
 
 
-def idle_samples(n, p):
-    return [(0.0, p["f0"] + noise(0.0, p)) for _ in range(n)]
+def sample_stream():
+    """Endless stream of samples, one curve after another."""
+    while True:
+        yield from curve_samples()
 
 
 # MQTT client
@@ -164,66 +124,44 @@ client.connect(broker, port, 60)
 client.loop_start()
 
 total_messages_sent = 0
-phase_switch_index = points_per_curve // 2
-
-
-def publish_point(depth_nm, force_uN, phase, motor_working):
-    """Build one telemetry payload matching the real device schema and publish it."""
-    global total_messages_sent
-    payload = {
-        "displacement": DISPLACEMENT_SIGN * depth_nm * NM_TO_MM,  # mm
-        "force": force_uN * UN_TO_MN,                             # mN
-        "timestamp": datetime.now().isoformat(),
-        "device_id": "Qz2f4BuKsdcW",
-        "device_token": "2iUnGOCh0w63eOWG",
-        "phase": phase,
-        "motor_working": motor_working,
-    }
-    client.publish(topic, orjson.dumps(payload), qos=1, retain=False)
-    total_messages_sent += 1
-
-
-def send_batched(samples, phase, motor_working, label):
-    """Send (depth_nm, force_uN) samples at ~points_per_batch/sec."""
-    i = 0
-    while i < len(samples):
-        start_time = time.time()
-        sent_this_round = 0
-        while sent_this_round < points_per_batch and i < len(samples):
-            d, f = samples[i]
-            publish_point(d, f, phase, motor_working)
-            i += 1
-            sent_this_round += 1
-        time.sleep(max(0, 1 - (time.time() - start_time)))
-        print(f"[{label}] Sent {sent_this_round} msgs this round, Total: {total_messages_sent}")
-
+samples = sample_stream()
 
 try:
-    for curve_number in range(1, num_curves + 1):
-        p = make_curve_params()
-        print(
-            f"--- Curve {curve_number}/{num_curves}: max depth {p['max_depth']:.1f} nm, "
-            f"stiffness x{p['k'] / K_MEAN:.3f} ---"
-        )
+    # Loop only while we still have points to send
+    while total_messages_sent < total_points:
+        start_time = time.time()
+        messages_sent = 0
 
-        # motor_working=1 across indent, delay and retract, like the real device,
-        # so the backend buffers the whole sequence as ONE curve.
-        send_batched(indent_samples(phase_switch_index, p), 0, 1, f"curve {curve_number} indent")
+        for _ in range(points_per_batch):
+            if total_messages_sent >= total_points:
+                break
 
-        had_delay = delay_points_per_curve > 0
-        if had_delay:
-            send_batched(delay_samples(delay_points_per_curve, p), 2, 1, f"curve {curve_number} delay")
+            depth_nm, force_uN = next(samples)
+            timestamp = datetime.now().isoformat()
 
-        send_batched(
-            retract_samples(points_per_curve - phase_switch_index, p, had_delay),
-            1, 1, f"curve {curve_number} retract",
-        )
+            payload = {
+                "displacement": DISPLACEMENT_SIGN * depth_nm * NM_TO_M,  # m
+                "force": force_uN * UN_TO_N,                             # N
+                "timestamp": timestamp,
+                "device_id": "Qz2f4BuKsdcW",
+                "device_token": "2iUnGOCh0w63eOWG",
+            }
 
-        if idle_points_between_curves > 0:
-            # 1->0 transition: backend flushes the completed curve.
-            send_batched(idle_samples(idle_points_between_curves, p), 1, 0, f"curve {curve_number} idle")
+            # Use retain=False for streaming telemetry
+            info = client.publish(topic, orjson.dumps(payload), qos=1, retain=False)
+            # Optional: wait for QoS1 ack for each message (can be skipped for speed)
+            # info.wait_for_publish()
+
+            messages_sent += 1
+            total_messages_sent += 1
+
+        elapsed = time.time() - start_time
+        time.sleep(max(0, 1 - elapsed))
+        print(f"Sent {messages_sent} msgs this round, Total: {total_messages_sent}")
 
     print("All messages sent. Flushing in-flight publishes...")
+
+    # Give a moment for any in-flight QoS1 messages to complete
     time.sleep(0.5)
 
 except KeyboardInterrupt:
