@@ -1,3 +1,10 @@
+"""
+MQTT curve publisher for local MON-topic testing.
+
+Publishes synthetic indent/retract curves with motor_working boundaries so the
+backend curve accumulator can flush each curve to the frontend WebSocket
+(motor 0->1 starts a curve, 1->0 finishes and broadcasts it).
+"""
 import time
 import math
 import paho.mqtt.client as mqtt
@@ -11,26 +18,35 @@ broker = "127.0.0.1"
 port = 1883
 topic = "MON"
 
+# Default device credentials used by the local test publisher
+DEVICE_ID = "TsmfTUI5FCAf"
+DEVICE_TOKEN = "q23GeDPV02xybXxT"
+
+
 def on_connect(client, userdata, flags, rc):
+    # Confirm broker handshake so rate/connect issues are visible in the terminal
     print("Connected with result code:", rc)
 
 # CLI argument validation
-# points_per_batch  — messages published per second
-# total_points      — total messages to send (curves are streamed back-to-back)
-# points_per_curve  — optional, samples per full curve (indent + retract), default 200
-if len(sys.argv) not in (3, 4):
-    print("Usage: python publisher.py <points_per_batch> <total_points> [points_per_curve=200]")
+# points_per_batch  — messages published per second (rate limit)
+# num_curves        — how many full curves to send (default 10)
+# points_per_curve  — samples per full curve indent+retract (default 100)
+if len(sys.argv) not in (1, 2, 3, 4):
+    print("Usage: python pub.py [points_per_batch=50] [num_curves=10] [points_per_curve=100]")
     sys.exit(1)
 
 try:
-    points_per_batch = int(sys.argv[1])
-    total_points = int(sys.argv[2])
-    points_per_curve = int(sys.argv[3]) if len(sys.argv) == 4 else 200
+    # Messages published per second while streaming curve points
+    points_per_batch = int(sys.argv[1]) if len(sys.argv) >= 2 else 50
+    # Number of complete curves to publish before exiting
+    num_curves = int(sys.argv[2]) if len(sys.argv) >= 3 else 10
+    # Samples per curve (indent half + retract half when INCLUDE_RETRACT)
+    points_per_curve = int(sys.argv[3]) if len(sys.argv) >= 4 else 100
 except ValueError:
     print("Error: arguments must be integers.")
     sys.exit(1)
 
-if points_per_batch <= 0 or total_points <= 0 or points_per_curve < 2:
+if points_per_batch <= 0 or num_curves <= 0 or points_per_curve < 2:
     print("Error: arguments must be positive integers (points_per_curve >= 2).")
     sys.exit(1)
 
@@ -68,6 +84,7 @@ K_MEAN = (FORCE_AT_MAX_UN - BASELINE_FORCE_UN) / MAX_DEPTH_NM ** POWER_EXPONENT
 
 
 def make_curve_params():
+    # Randomize stiffness/depth slightly so successive curves are not identical
     return {
         "max_depth": max(1.0, random.gauss(MAX_DEPTH_NM, MAX_DEPTH_SD_NM)),
         "f0": random.gauss(BASELINE_FORCE_UN, BASELINE_FORCE_SD_UN),
@@ -76,11 +93,13 @@ def make_curve_params():
 
 
 def loading_force(d, p):
+    # Power-law loading plus a small contact bump near CONTACT_BUMP_NM
     bump = CONTACT_BUMP_UN * math.exp(-0.5 * ((d - CONTACT_BUMP_NM) / CONTACT_BUMP_WIDTH_NM) ** 2)
     return p["f0"] + p["k"] * max(d, 0.0) ** POWER_EXPONENT + bump
 
 
 def unloading_force(d, p):
+    # Unloading path that returns to baseline force at residual depth
     d_max = p["max_depth"]
     d_res = RESIDUAL_DEPTH_FRACTION * d_max
     if d <= d_res:
@@ -90,13 +109,20 @@ def unloading_force(d, p):
 
 
 def noise(d, p):
+    # Depth-dependent force noise (larger SD near max depth)
     frac = min(1.0, max(d, 0.0) / p["max_depth"])
     sd = NOISE_FLOOR_UN + (NOISE_AT_MAX_UN - NOISE_FLOOR_UN) * frac ** NOISE_EXPONENT
     return random.gauss(0.0, sd)
 
 
 def curve_samples():
-    """One full curve as a list of (depth_nm, force_uN)."""
+    """
+    One full curve as a list of (depth_nm, force_uN, phase, motor_working).
+
+    All motion samples use motor_working=1. Callers must publish a trailing
+    idle sample (motor_working=0) after this list so the backend flushes.
+    phase: 0 = indent, 1 = retract.
+    """
     p = make_curve_params()
     n_indent = points_per_curve // 2 if INCLUDE_RETRACT else points_per_curve
     n_retract = points_per_curve - n_indent if INCLUDE_RETRACT else 0
@@ -104,17 +130,24 @@ def curve_samples():
     out = []
     for i in range(n_indent):
         d = p["max_depth"] * i / max(1, n_indent - 1)
-        out.append((d, loading_force(d, p) + noise(d, p)))
+        out.append((d, loading_force(d, p) + noise(d, p), 0, 1))
     for i in range(n_retract):
         d = p["max_depth"] * (1 - (i + 1) / n_retract)
-        out.append((d, unloading_force(d, p) + noise(d, p)))
+        out.append((d, unloading_force(d, p) + noise(d, p), 1, 1))
     return out
 
 
-def sample_stream():
-    """Endless stream of samples, one curve after another."""
-    while True:
-        yield from curve_samples()
+def build_payload(depth_nm, force_uN, phase, motor_working):
+    # Build one MQTT telemetry dict in the shape the backend normalizer expects
+    return {
+        "displacement": DISPLACEMENT_SIGN * depth_nm * NM_TO_M,  # m
+        "force": force_uN * UN_TO_N,                             # N
+        "timestamp": datetime.now().isoformat(),
+        "device_id": DEVICE_ID,
+        "device_token": DEVICE_TOKEN,
+        "phase": phase,
+        "motor_working": motor_working,
+    }
 
 
 # MQTT client
@@ -123,45 +156,54 @@ client.on_connect = on_connect
 client.connect(broker, port, 60)
 client.loop_start()
 
+# Counts total MQTT publishes across all curves (motion + idle flush points)
 total_messages_sent = 0
-samples = sample_stream()
+# Counts how many complete curves (including their idle flush) have been finished
+curves_completed = 0
+# Holds points waiting to be rate-limited into the next one-second window
+pending_payloads = []
+
+print(
+    f"Publishing {num_curves} curves x {points_per_curve} points "
+    f"(+1 idle flush each) at ~{points_per_batch} msg/s"
+)
 
 try:
-    # Loop only while we still have points to send
-    while total_messages_sent < total_points:
-        start_time = time.time()
-        messages_sent = 0
+    for curve_index in range(num_curves):
+        # Motion samples for this curve (motor_working=1 throughout)
+        samples = curve_samples()
+        for depth_nm, force_uN, phase, motor_working in samples:
+            pending_payloads.append(build_payload(depth_nm, force_uN, phase, motor_working))
 
-        for _ in range(points_per_batch):
-            if total_messages_sent >= total_points:
-                break
+        # Trailing idle point: motor 1->0 edge that tells the backend to flush
+        last_depth_nm, last_force_uN, last_phase, _ = samples[-1]
+        pending_payloads.append(
+            build_payload(last_depth_nm, last_force_uN, last_phase, 0)
+        )
 
-            depth_nm, force_uN = next(samples)
-            timestamp = datetime.now().isoformat()
+        # Drain pending payloads at points_per_batch messages per second
+        while pending_payloads:
+            start_time = time.time()
+            messages_sent = 0
+            for _ in range(points_per_batch):
+                if not pending_payloads:
+                    break
+                payload = pending_payloads.pop(0)
+                client.publish(topic, orjson.dumps(payload), qos=1, retain=False)
+                messages_sent += 1
+                total_messages_sent += 1
 
-            payload = {
-                "displacement": DISPLACEMENT_SIGN * depth_nm * NM_TO_M,  # m
-                "force": force_uN * UN_TO_N,                             # N
-                "timestamp": timestamp,
-                "device_id": "TsmfTUI5FCAf",
-                "device_token": "q23GeDPV02xybXxT",
-            }
+            elapsed = time.time() - start_time
+            time.sleep(max(0, 1 - elapsed))
+            print(
+                f"Curve {curve_index + 1}/{num_curves}: "
+                f"sent {messages_sent} msgs this round, Total: {total_messages_sent}"
+            )
 
-            # Use retain=False for streaming telemetry
-            info = client.publish(topic, orjson.dumps(payload), qos=1, retain=False)
-            # Optional: wait for QoS1 ack for each message (can be skipped for speed)
-            # info.wait_for_publish()
+        curves_completed += 1
+        print(f"Finished curve {curves_completed}/{num_curves} (motor_working flushed to 0)")
 
-            messages_sent += 1
-            total_messages_sent += 1
-
-        elapsed = time.time() - start_time
-        time.sleep(max(0, 1 - elapsed))
-        print(f"Sent {messages_sent} msgs this round, Total: {total_messages_sent}")
-
-    print("All messages sent. Flushing in-flight publishes...")
-
-    # Give a moment for any in-flight QoS1 messages to complete
+    print("All curves sent. Flushing in-flight publishes...")
     time.sleep(0.5)
 
 except KeyboardInterrupt:
@@ -170,5 +212,8 @@ except KeyboardInterrupt:
 finally:
     client.loop_stop()
     client.disconnect()
-    print("Program finished.")
+    print(
+        f"Program finished. Curves={curves_completed}/{num_curves}, "
+        f"messages={total_messages_sent}"
+    )
     sys.exit(0)
