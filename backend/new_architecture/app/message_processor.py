@@ -471,14 +471,15 @@ async def _resolve_user_id_for_device(device_id: str) -> str:
 async def broadcast_messages(device_id: str):
     """
     Consume this device's queue and forward COMPLETE curves — not individual
-    points — to the frontend that owns this device.
+    points — to every connected WebSocket client.
 
     Incoming points are first drained from the queue in small polling
     windows (purely so we don't busy-loop on an empty queue), then run
     through _accumulate_curve_points() which buffers them until motor_working
     transitions 1 -> 0 (motor stops). Nothing is sent to the frontend while a
     curve is still in progress; once a curve completes, the entire buffered
-    curve is sent as a single WebSocket message.
+    curve is sent as a single WebSocket message to all clients (no device_id /
+    device_token ownership check).
     """
     global total_messages_sent_to_frontend
     BATCH_SIZE = 2000  # Max points drained from the queue per polling cycle
@@ -511,35 +512,78 @@ async def broadcast_messages(device_id: str):
         if not completed_curves:
             continue  # Curve still in progress (or motor idle) — nothing to send yet.
 
-        # Re-resolve owner once per polling cycle so routing picks up DB changes and new WebSocket sessions
-        target_frontend = await _resolve_user_id_for_device(device_id)
-        websockets = websocket_connections.get(target_frontend, set())
-        debug_log(f"[CHECK] Checking websockets for frontend-{target_frontend}: {len(websockets)} connections")
+        # Count how many client buckets currently have at least one open socket.
+        connected_client_count = sum(1 for sockets in websocket_connections.values() if sockets)
+        debug_log(
+            f"[CHECK] Fan-out to all clients: {connected_client_count} client(s) with open WebSockets"
+        )
 
         for curve_points in completed_curves:
             debug_log(
                 f"[SEND] Sending completed curve of {len(curve_points)} points "
-                f"from {device_id} to frontend-{target_frontend}"
+                f"from {device_id} to all connected clients"
             )
             total_messages_sent_to_frontend += len(curve_points)  # Update the accumulator
             debug_log(f"[STATS] Total messages sent to frontend: {total_messages_sent_to_frontend}")
 
-            if websockets:
+            if connected_client_count:
                 try:
-                    await send_to_connected_clients_optimized(target_frontend, curve_points)
+                    # Fan out regardless of device_id / device_token ownership.
+                    await send_to_all_connected_clients(curve_points)
                     # MONITORING: Count successful broadcasts
                     processing_counters.broadcast_sent += len(curve_points)
-                    debug_log(f"[OK] Successfully sent completed curve to frontend-{target_frontend}")
+                    debug_log(f"[OK] Successfully sent completed curve to all connected clients")
                 except Exception as e:
                     # MONITORING: Count broadcast errors
                     processing_counters.broadcast_errors += len(curve_points)
-                    print(f"[ERROR] Error sending curve to frontend-{target_frontend}: {e}")
+                    print(f"[ERROR] Error sending curve to all connected clients: {e}")
             else:
-                print(f"[WARNING] No WebSocket connections found for frontend-{target_frontend}")
+                print(f"[WARNING] No WebSocket connections found for any client")
+
+
+# Serializes one payload once, then pushes it to every open WebSocket across all clients.
+async def send_to_all_connected_clients(messages: list):
+    """
+    Fan-out a message batch to every WebSocket in websocket_connections.
+    Skips device-owner routing so any device_id/token reaches all dashboards.
+    """
+    # Flatten all active sockets from every client_id bucket.
+    all_websockets = [
+        ws
+        for sockets in websocket_connections.values()
+        for ws in sockets
+    ]
+    if not all_websockets:
+        debug_log("No active websocket connections found for any client")
+        return
+
+    try:
+        # OPTIMIZED: Use orjson for faster serialization and binary output
+        message_data = orjson.dumps(messages)
+
+        # OPTIMIZED: Compress large payloads to reduce network overhead
+        if len(message_data) > COMPRESSION_THRESHOLD:
+            compressed_data = zlib.compress(message_data, level=COMPRESSION_LEVEL)
+            debug_log(
+                f"📦 Compressed payload: {len(message_data)} -> {len(compressed_data)} bytes "
+                f"({len(compressed_data)/len(message_data)*100:.1f}% compression)"
+            )
+            # Send compressed data as binary to every open socket
+            tasks = [ws.send_bytes(compressed_data) for ws in all_websockets]
+        else:
+            # Send uncompressed data as binary (faster than text)
+            tasks = [ws.send_bytes(message_data) for ws in all_websockets]
+
+        # OPTIMIZED: Use gather for concurrent sending
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    except Exception as e:
+        # Prevent crash if a socket dies mid-broadcast; caller still counts errors.
+        print(f"Error broadcasting messages to all connected clients: {e}")
 
 
 async def send_to_connected_clients_optimized(client_id: str, messages: list):
-    """Send a batch of messages to all connected WebSocket clients with optimizations."""
+    """Send a batch of messages to all WebSocket sockets for one client_id."""
     websockets = websocket_connections.get(client_id, set())
     if not websockets:
         debug_log(f"No active websocket connections found for user {client_id}")
