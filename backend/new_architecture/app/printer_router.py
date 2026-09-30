@@ -37,7 +37,12 @@ Auto-reconnect behaviour
 
 import asyncio
 import json
+import logging
 import uuid
+
+# Avoid "DEBUG:websockets.client:= connection is CONNECTING" spam on each poll retry.
+logging.getLogger("websockets").setLevel(logging.WARNING)
+logging.getLogger("websockets.client").setLevel(logging.WARNING)
 from typing import Optional
 
 import websockets
@@ -317,6 +322,10 @@ printer_service = PrinterService()
 # get_printer_status() — used by the /ws/printer push loop in main.py
 # ---------------------------------------------------------------------------
 
+# Last failure text printed by get_printer_status; used to skip identical spam.
+_last_printer_status_error: str | None = None
+
+
 async def get_printer_status() -> dict:
     """
     Fetch live position + temperatures from the Pi in a single WebSocket call.
@@ -327,11 +336,18 @@ async def get_printer_status() -> dict:
 
     Never raises — returns safe fallback values so the push loop keeps running.
     """
+    global _last_printer_status_error
     try:
-        return await _ws_client.call("printer_status", timeout=10.0)
+        result = await _ws_client.call("printer_status", timeout=10.0)
+        # Clear so the next distinct failure is printed again after recovery.
+        _last_printer_status_error = None
+        return result
     except (HTTPException, Exception) as exc:
         detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
-        print(f"[get_printer_status] failed: {detail}")
+        # Only log when the error text changes; the push loop polls often.
+        if detail != _last_printer_status_error:
+            print(f"[get_printer_status] failed: {detail}")
+            _last_printer_status_error = detail
         return {
             "position":     {},
             "temperatures": {"hotend_temp": None, "bed_temp": None},
