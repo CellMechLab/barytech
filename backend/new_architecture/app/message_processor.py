@@ -4,7 +4,7 @@ import time
 import orjson
 import zlib
 from datetime import datetime
-from typing import Dict, Set, List
+from typing import Dict, Set
 from fastapi import WebSocket
 from app.db import get_db, save_device_data_batch
 from app.models import IoTDevice
@@ -31,110 +31,6 @@ WEBSOCKET_BATCH_SIZE = 500  # Smaller batch size for frontend broadcast
 WEBSOCKET_BATCH_TIMEOUT = 0.02  # 20ms timeout for frontend batches
 COMPRESSION_THRESHOLD = 1000  # Compress if batch size > 1000
 COMPRESSION_LEVEL = 6  # zlib compression level (1-9, 6 is balanced)
-
-# ── Curve accumulation state ───────────────────────────────────────────────
-# Instead of streaming every telemetry sample to the frontend as it arrives,
-# points are buffered per device_id until a full "curve" (one motor
-# start->stop cycle) has been captured, then sent to the frontend in a
-# single WebSocket message. See _accumulate_curve_points() for the boundary
-# detection logic.
-
-# device_id -> list of points accumulated so far for the in-progress curve.
-device_curve_buffers: Dict[str, list] = {}
-# device_id -> True while a curve is currently being accumulated (motor moving).
-device_curve_active: Dict[str, bool] = {}
-# device_id -> last observed motor_working value, used to detect the 1->0 "motor
-# just stopped" transition that marks a curve as complete.
-device_last_motor_state: Dict[str, int] = {}
-# device_id -> wall-clock time (seconds) when the current curve started
-# accumulating; used only by the stuck-motor safety valve below.
-device_curve_start_time: Dict[str, float] = {}
-
-# Safety limits so a curve whose motor_working flag never reports back to 0
-# (e.g. a stuck sensor or firmware bug) doesn't buffer forever and blow up
-# memory/latency. If either limit is hit, the buffer is force-flushed as a
-# "curve" even though no genuine motor-stop was observed.
-CURVE_MAX_POINTS = 50000  # Hard cap on points buffered for a single in-progress curve
-CURVE_MAX_DURATION_SECONDS = 300  # Force-flush a curve running longer than this (5 min)
-
-
-def _accumulate_curve_points(device_id: str, batch: list) -> List[list]:
-    """
-    Feed a batch of normalized telemetry points for one device through the
-    curve-boundary state machine and return any curves that are now complete.
-
-    A "curve" is defined as the span of samples during which motor_working
-    stays at 1; the curve is considered finished the instant motor_working
-    transitions back to 0 (motor stops). Points seen while no curve is
-    active (motor idle) are discarded — they carry no motion and aren't
-    part of a curve.
-
-    Note: a curve's `phase` field cycles through indent (0) -> delay/dwell
-    hold (2) -> retract (1) as it progresses, but motor_working is reported
-    as 1 across all three sub-phases (the delay hold does NOT drop
-    motor_working to 0), so this function doesn't need to look at `phase` at
-    all — the whole indent+delay+retract sequence is captured as one
-    uninterrupted curve, and only flushes once retract actually finishes.
-
-    Returns a list of completed curves (each itself a list of points, in
-    arrival order). Usually empty (curve still in progress) or has exactly
-    one entry; can have more than one only if a single batch happens to
-    contain multiple full start/stop cycles.
-    """
-    completed_curves: List[list] = []
-
-    # Buffer + state for this device, created lazily on first message seen.
-    buffer = device_curve_buffers.setdefault(device_id, [])
-    was_active = device_curve_active.get(device_id, False)
-    last_motor_state = device_last_motor_state.get(device_id, 0)
-
-    for point in batch:
-        # Default to idle (0) if the field is missing for any reason.
-        motor_working = point.get("motor_working", 0) or 0
-
-        if not was_active and motor_working == 1:
-            # Rising edge: motor just started moving -> begin a new curve.
-            buffer = []
-            device_curve_buffers[device_id] = buffer
-            device_curve_start_time[device_id] = time.time()
-            was_active = True
-
-        if not was_active:
-            # No curve in progress and motor still idle — nothing to buffer.
-            last_motor_state = motor_working
-            continue
-
-        buffer.append(point)
-
-        if last_motor_state == 1 and motor_working == 0:
-            # Falling edge: motor just stopped -> this curve is complete.
-            completed_curves.append(buffer)
-            buffer = []
-            device_curve_buffers[device_id] = buffer
-            was_active = False
-        else:
-            # Safety valve: force-flush pathologically long/stuck curves so
-            # memory and end-to-end latency stay bounded even if
-            # motor_working never reports back to 0.
-            elapsed = time.time() - device_curve_start_time.get(device_id, time.time())
-            if len(buffer) >= CURVE_MAX_POINTS or elapsed >= CURVE_MAX_DURATION_SECONDS:
-                print(
-                    f"[WARNING] Force-flushing oversized/stuck curve for device {device_id} "
-                    f"({len(buffer)} points, {elapsed:.0f}s) — motor_working never reported 0"
-                )
-                completed_curves.append(buffer)
-                buffer = []
-                device_curve_buffers[device_id] = buffer
-                device_curve_start_time[device_id] = time.time()
-                # Stay "active" — subsequent points keep accumulating into the
-                # next chunk until a genuine motor stop is eventually seen.
-
-        last_motor_state = motor_working
-
-    device_curve_active[device_id] = was_active
-    device_last_motor_state[device_id] = last_motor_state
-
-    return completed_curves
 
 # Monitoring counters for broadcasting and database operations
 class ProcessingCounters:
@@ -470,47 +366,40 @@ async def _resolve_user_id_for_device(device_id: str) -> str:
 
 async def broadcast_messages(device_id: str):
     """
-    Consume this device's queue and forward COMPLETE curves — not individual
-    points — to every connected WebSocket client.
+    Consume this device's queue and forward points to every connected WebSocket
+    client as soon as they arrive (small poll batches only — no curve buffering).
 
-    Incoming points are first drained from the queue in small polling
-    windows (purely so we don't busy-loop on an empty queue), then run
-    through _accumulate_curve_points() which buffers them until motor_working
-    transitions 1 -> 0 (motor stops). Nothing is sent to the frontend while a
-    curve is still in progress; once a curve completes, the entire buffered
-    curve is sent as a single WebSocket message to all clients (no device_id /
-    device_token ownership check).
+    Points are drained from the queue in short polling windows so we don't
+    busy-loop when idle, then sent immediately to all clients. motor_working
+    is still present on each point for the frontend/DB, but is NOT used as a
+    gate for when to broadcast.
     """
     global total_messages_sent_to_frontend
-    BATCH_SIZE = 2000  # Max points drained from the queue per polling cycle
-    BATCH_TIMEOUT = 0.05  # Max seconds spent polling before processing what's arrived
+    # Max points drained from the queue per polling cycle
+    BATCH_SIZE = 2000
+    # Max seconds spent polling before processing what's arrived
+    BATCH_TIMEOUT = 0.05
     queue = device_queues[device_id]
 
     while True:
         batch = []
-        start_time = time.time()  # Track the time when batch collection started
+        # Track the time when batch collection started
+        start_time = time.time()
         # Collect messages for the batch
         while len(batch) < BATCH_SIZE and (time.time() - start_time) < BATCH_TIMEOUT:
-            try:    
-                message = await asyncio.wait_for(queue.get(), timeout=0.005)  # Reduced timeout
+            try:
+                message = await asyncio.wait_for(queue.get(), timeout=0.005)
                 batch.append(message)
             except asyncio.TimeoutError:
-                await asyncio.sleep(0.0005)  # Reduced sleep time
+                await asyncio.sleep(0.0005)
 
         if not batch:
             # No messages collected in this cycle, sleep briefly to reduce CPU usage
-            await asyncio.sleep(0.005)  # Reduced sleep time
+            await asyncio.sleep(0.005)
             continue
 
         # MONITORING: Count device processed messages
         processing_counters.device_processed += len(batch)
-
-        # Feed this batch through the curve-boundary state machine. This only
-        # returns curves that just finished (motor stopped); an in-progress
-        # curve stays buffered inside device_curve_buffers and yields nothing here.
-        completed_curves = _accumulate_curve_points(device_id, batch)
-        if not completed_curves:
-            continue  # Curve still in progress (or motor idle) — nothing to send yet.
 
         # Count how many client buckets currently have at least one open socket.
         connected_client_count = sum(1 for sockets in websocket_connections.values() if sockets)
@@ -518,27 +407,25 @@ async def broadcast_messages(device_id: str):
             f"[CHECK] Fan-out to all clients: {connected_client_count} client(s) with open WebSockets"
         )
 
-        for curve_points in completed_curves:
-            debug_log(
-                f"[SEND] Sending completed curve of {len(curve_points)} points "
-                f"from {device_id} to all connected clients"
-            )
-            total_messages_sent_to_frontend += len(curve_points)  # Update the accumulator
-            debug_log(f"[STATS] Total messages sent to frontend: {total_messages_sent_to_frontend}")
+        debug_log(
+            f"[SEND] Streaming {len(batch)} points from {device_id} to all connected clients"
+        )
+        total_messages_sent_to_frontend += len(batch)
+        debug_log(f"[STATS] Total messages sent to frontend: {total_messages_sent_to_frontend}")
 
-            if connected_client_count:
-                try:
-                    # Fan out regardless of device_id / device_token ownership.
-                    await send_to_all_connected_clients(curve_points)
-                    # MONITORING: Count successful broadcasts
-                    processing_counters.broadcast_sent += len(curve_points)
-                    debug_log(f"[OK] Successfully sent completed curve to all connected clients")
-                except Exception as e:
-                    # MONITORING: Count broadcast errors
-                    processing_counters.broadcast_errors += len(curve_points)
-                    print(f"[ERROR] Error sending curve to all connected clients: {e}")
-            else:
-                print(f"[WARNING] No WebSocket connections found for any client")
+        if connected_client_count:
+            try:
+                # Fan out regardless of device_id / device_token ownership.
+                await send_to_all_connected_clients(batch)
+                # MONITORING: Count successful broadcasts
+                processing_counters.broadcast_sent += len(batch)
+                debug_log(f"[OK] Successfully streamed batch to all connected clients")
+            except Exception as e:
+                # MONITORING: Count broadcast errors
+                processing_counters.broadcast_errors += len(batch)
+                print(f"[ERROR] Error streaming batch to all connected clients: {e}")
+        else:
+            print(f"[WARNING] No WebSocket connections found for any client")
 
 
 # Serializes one payload once, then pushes it to every open WebSocket across all clients.

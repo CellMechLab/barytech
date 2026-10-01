@@ -23,10 +23,9 @@ export const WebSocketProvider = ({ children }) => {
   const [socket, setSocket] = useState(null);
   const [dataBuffer, setDataBuffer] = useState([]); // State to hold received data
   const [dataBuffer1, setDataBuffer1] = useState([]); // State to hold received data
-  // Holds only the most recently received curve's points, waiting to be flushed
-  // into dataBuffer. The backend sends one complete curve per WebSocket message,
-  // so this is overwritten (not appended to) on every message — see
-  // queueDataBufferUpdate below for why older curves are intentionally dropped.
+  // Holds recently streamed points waiting to be flushed into dataBuffer.
+  // Backend now streams points as they arrive (not one complete curve per
+  // message), so batches are appended here until the flush timeout fires.
   const pendingDataMessages = useRef([]);
   const dataBufferFlushTimeout = useRef(null);
   const [connected, setConnected] = useState(false);
@@ -47,28 +46,24 @@ export const WebSocketProvider = ({ children }) => {
     setIndentationStatus("Unable to start indentation. Check the printer connection and try again.");
   };
   const queueDataBufferUpdate = (messages) => {
-    // Each WebSocket message is one complete, already-finished curve (see backend
-    // message_processor.py's motor_working 1->0 curve-flush logic), not a partial
-    // stream of points. So the newest message should REPLACE whatever curve is
-    // currently on screen, not be appended alongside it — overwriting (rather than
-    // pushing onto) the pending buffer means that if a second curve message arrives
-    // before the flush timeout below fires, the earlier curve is dropped entirely
-    // instead of being visually mixed together with the new one.
-    pendingDataMessages.current = messages;
+    // Append streamed points so the chart grows live as batches arrive.
+    // Previously this replaced the buffer because each WS message was one
+    // finished curve; with immediate streaming we must accumulate.
+    pendingDataMessages.current = pendingDataMessages.current.concat(messages);
 
     if (dataBufferFlushTimeout.current !== null) {
       return;
     }
 
     dataBufferFlushTimeout.current = window.setTimeout(() => {
-      const latestCurveMessages = pendingDataMessages.current;
+      const pendingMessages = pendingDataMessages.current;
       pendingDataMessages.current = [];
       dataBufferFlushTimeout.current = null;
 
-      // Replace the buffer outright so the previous curve disappears the moment
-      // a new one finishes arriving; the slice still guards against a single
-      // pathologically large curve (e.g. the backend's stuck-motor safety valve).
-      setDataBuffer(latestCurveMessages.slice(-MAX_DATA_BUFFER_POINTS));
+      // Append onto the live buffer and keep only the newest N points.
+      setDataBuffer((prev) =>
+        prev.concat(pendingMessages).slice(-MAX_DATA_BUFFER_POINTS)
+      );
     }, DATA_BUFFER_FLUSH_INTERVAL_MS);
   };
   useEffect(() => {

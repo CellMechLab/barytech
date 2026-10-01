@@ -116,8 +116,8 @@ def normalize_data_point(data_point):
         force_key, force = first_defined_key_and_value(state, force_keys)
     # Phase: 0 = indenting (segment0), 1 = retracting (segment2), 2 = delay/dwell
     # hold between indent and retract (segment1). motor_working stays 1 across
-    # all three sub-phases (see message_processor._accumulate_curve_points),
-    # so a delay period never causes the in-progress curve to flush early.
+    # all three sub-phases; the frontend can use phase / motor_working for
+    # display, but broadcast no longer waits on motor stop before streaming.
     phase_raw = first_defined_value(
         data_point,
         ["phase", "Phase", "segment", "segment_type", "segmentType"],

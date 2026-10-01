@@ -107,12 +107,25 @@ def noisy(z, f, i, p):
 
 
 def curve_samples():
-    """One full curve as a list of (z_um, force_uN)."""
+    """One full curve as a list of sample dicts (motor=1 while moving).
+
+    phase: 0 = indent, 1 = retract (matches mqtt_client / message_processor).
+    motor: 1 for every live sample; the stream adds motor=0 after the curve
+    so the backend can flush (message_processor 1->0 edge).
+    """
+    # Random stiffness / contact / stop params for this curve
     p = make_curve_params()
+    # Accumulated (z_um, force_uN, phase) samples for this indent(+retract)
     out = []
     z, i = 0.0, 0
     while True:
-        out.append((z, noisy(z, clean_force(z, p), i, p)))
+        # Indent sample: phase 0, motor still moving
+        out.append({
+            "z_um": z,
+            "force_uN": noisy(z, clean_force(z, p), i, p),
+            "phase": 0,
+            "motor": 1,
+        })
         step = Z_STEP_UM + random.gauss(0.0, Z_STEP_SD_UM)
         if random.random() < SKIP_PROB:
             step *= 2
@@ -121,13 +134,19 @@ def curve_samples():
         z += step
         i += 1
 
-    # Final point at the force limit, after a larger Z step (as in the CSV)
+    # Final indent point at the force limit, after a larger Z step (as in the CSV)
     z_max = z + FINAL_STEP_UM + random.gauss(0.0, Z_STEP_SD_UM)
     f_peak = random.uniform(*FINAL_FORCE_RANGE_UN)
-    out.append((z_max, f_peak))
+    out.append({
+        "z_um": z_max,
+        "force_uN": f_peak,
+        "phase": 0,
+        "motor": 1,
+    })
 
     if INCLUDE_RETRACT:
-        f0 = out[0][1]
+        # Contact force at Z=0; residual depth where unload returns to baseline
+        f0 = out[0]["force_uN"]
         z_res = RESIDUAL_DEPTH_FRACTION * z_max
         n_retract = len(out) - 1
         for k in range(1, n_retract + 1):
@@ -136,14 +155,53 @@ def curve_samples():
                 f = f0
             else:
                 f = f0 + (f_peak - f0) * ((zr - z_res) / (z_max - z_res)) ** UNLOAD_EXPONENT
-            out.append((zr, noisy(zr, f, k, p)))
+            # Retract sample: phase 1, motor still moving until flush below
+            out.append({
+                "z_um": zr,
+                "force_uN": noisy(zr, f, k, p),
+                "phase": 1,
+                "motor": 1,
+            })
     return out
 
 
 def sample_stream():
-    """Endless stream of samples, one curve after another."""
+    """Endless stream of samples; after each curve, emit motor=0 to flush it.
+
+    Backend (_accumulate_curve_points) buffers while motor==1 and flushes the
+    curve on the falling edge 1 -> 0. Without that idle sample, completed
+    curves never leave the in-progress buffer.
+    """
     while True:
-        yield from curve_samples()
+        curve = curve_samples()
+        yield from curve
+        # Repeat last pose with motor idle so the backend flushes this curve
+        last = curve[-1]
+        yield {
+            "z_um": last["z_um"],
+            "force_uN": last["force_uN"],
+            "phase": last["phase"],
+            "motor": 0,
+        }
+
+
+# Device credentials embedded in every published telemetry payload
+DEVICE_ID = "TsmfTUI5FCAf"
+DEVICE_TOKEN = "q23GeDPV02xybXxT"
+
+
+def build_payload(sample):
+    """Build one MQTT JSON payload from a curve sample dict."""
+    return {
+        "displacement": DISPLACEMENT_SIGN * sample["z_um"] * UM_TO_M,  # m
+        "force": sample["force_uN"] * UN_TO_N,                         # N
+        "phase": sample["phase"],
+        # mqtt_client accepts "motor" and normalizes to motor_working
+        "motor": sample["motor"],
+        "timestamp": datetime.now().isoformat(),
+        "device_id": DEVICE_ID,
+        "device_token": DEVICE_TOKEN,
+    }
 
 
 # MQTT client
@@ -152,7 +210,10 @@ client.on_connect = on_connect
 client.connect(broker, port, 60)
 client.loop_start()
 
+# Running count of published MQTT messages (includes motor=0 flush samples)
 total_messages_sent = 0
+# Last sample published; used to force motor=0 if we stop mid-curve
+last_sample = None
 samples = sample_stream()
 
 try:
@@ -165,28 +226,28 @@ try:
             if total_messages_sent >= total_points:
                 break
 
-            z_um, force_uN = next(samples)
-            timestamp = datetime.now().isoformat()
-
-            payload = {
-                "displacement": DISPLACEMENT_SIGN * z_um * UM_TO_M,  # m
-                "force": force_uN * UN_TO_N,                         # N
-                "timestamp": timestamp,
-                "device_id": "TsmfTUI5FCAf",
-                "device_token": "q23GeDPV02xybXxT",
-            }
+            sample = next(samples)
+            payload = build_payload(sample)
 
             # Use retain=False for streaming telemetry
             info = client.publish(topic, orjson.dumps(payload), qos=1, retain=False)
             # Optional: wait for QoS1 ack for each message (can be skipped for speed)
             # info.wait_for_publish()
 
+            last_sample = sample
             messages_sent += 1
             total_messages_sent += 1
 
         elapsed = time.time() - start_time
         time.sleep(max(0, 1 - elapsed))
         print(f"Sent {messages_sent} msgs this round, Total: {total_messages_sent}")
+
+    # If total_points cut us off mid-curve, send motor=0 so the backend flushes
+    if last_sample is not None and last_sample["motor"] == 1:
+        flush = dict(last_sample)
+        flush["motor"] = 0
+        client.publish(topic, orjson.dumps(build_payload(flush)), qos=1, retain=False)
+        print("Sent motor=0 flush for incomplete final curve")
 
     print("All messages sent. Flushing in-flight publishes...")
 
@@ -195,6 +256,12 @@ try:
 
 except KeyboardInterrupt:
     print("Stopped by user")
+    # Also flush on Ctrl-C if a curve was in progress
+    if last_sample is not None and last_sample["motor"] == 1:
+        flush = dict(last_sample)
+        flush["motor"] = 0
+        client.publish(topic, orjson.dumps(build_payload(flush)), qos=1, retain=False)
+        print("Sent motor=0 flush after interrupt")
 
 finally:
     client.loop_stop()
