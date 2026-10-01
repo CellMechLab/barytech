@@ -116,8 +116,8 @@ def curve_samples():
     """One full curve as a list of sample dicts (motor=1 while moving).
 
     phase: 0 = indent, 1 = retract (matches mqtt_client / message_processor).
-    motor: 1 for every live sample; the stream adds motor=0 after the curve
-    so the backend can flush (message_processor 1->0 edge).
+    motor: 1 for every live sample. A single motor=0 is published after the
+    whole CLI run finishes so the dashboard can close the folder save curve.
     """
     # Random stiffness / contact / stop params for this curve
     p = make_curve_params()
@@ -172,23 +172,14 @@ def curve_samples():
 
 
 def sample_stream():
-    """Endless stream of samples; after each curve, emit motor=0 to flush it.
+    """Endless stream of live samples with motor=1 (indent still running).
 
-    Backend (_accumulate_curve_points) buffers while motor==1 and flushes the
-    curve on the falling edge 1 -> 0. Without that idle sample, completed
-    curves never leave the in-progress buffer.
+    motor=0 is NOT emitted between curves. The publisher sends a single
+    motor=0 after all CLI points are done so the frontend/backend can close
+    the save session and treat the run as one finished curve.
     """
     while True:
-        curve = curve_samples()
-        yield from curve
-        # Repeat last pose with motor idle so the backend flushes this curve
-        last = curve[-1]
-        yield {
-            "z_um": last["z_um"],
-            "force_uN": last["force_uN"],
-            "phase": last["phase"],
-            "motor": 0,
-        }
+        yield from curve_samples()
 
 
 # Device credentials embedded in every published telemetry payload
@@ -198,16 +189,28 @@ DEVICE_TOKEN = "q23GeDPV02xybXxT"
 
 def build_payload(sample):
     """Build one MQTT JSON payload from a curve sample dict."""
+    # Motor activity flag mirrored as state for older clients that only watch state
+    motor = sample["motor"]
     return {
         "displacement": DISPLACEMENT_SIGN * sample["z_um"] * UM_TO_M,  # m
         "force": sample["force_uN"] * UN_TO_N,                         # N
         "phase": sample["phase"],
         # mqtt_client accepts "motor" and normalizes to motor_working
-        "motor": sample["motor"],
+        "motor": motor,
+        # 1 = indent in progress, 0 = finished — closes folder save on the dashboard
+        "state": motor,
         "timestamp": datetime.now().isoformat(),
         "device_id": DEVICE_ID,
         "device_token": DEVICE_TOKEN,
     }
+
+
+def publish_motor_stop(sample):
+    """Publish motor=0 / state=0 so the backend folder save closes this curve."""
+    flush = dict(sample)
+    flush["motor"] = 0
+    client.publish(topic, orjson.dumps(build_payload(flush)), qos=1, retain=False)
+    print("Sent motor=0 — indentation stopped, curve ready to save")
 
 
 # MQTT client
@@ -216,9 +219,9 @@ client.on_connect = on_connect
 client.connect(broker, port, 60)
 client.loop_start()
 
-# Running count of published MQTT messages (includes motor=0 flush samples)
+# Running count of published MQTT messages (live points only; stop is extra)
 total_messages_sent = 0
-# Last sample published; used to force motor=0 if we stop mid-curve
+# Last live sample; reused for the final motor=0 stop message
 last_sample = None
 samples = sample_stream()
 
@@ -248,12 +251,10 @@ try:
         time.sleep(max(0, 1 - elapsed))
         print(f"Sent {messages_sent} msgs this round, Total: {total_messages_sent}")
 
-    # If total_points cut us off mid-curve, send motor=0 so the backend flushes
-    if last_sample is not None and last_sample["motor"] == 1:
-        flush = dict(last_sample)
-        flush["motor"] = 0
-        client.publish(topic, orjson.dumps(build_payload(flush)), qos=1, retain=False)
-        print("Sent motor=0 flush for incomplete final curve")
+    # After ALL points: motor=0 tells the dashboard indentation finished and
+    # the open folder save session should close this curve.
+    if last_sample is not None:
+        publish_motor_stop(last_sample)
 
     print("All messages sent. Flushing in-flight publishes...")
 
@@ -262,12 +263,9 @@ try:
 
 except KeyboardInterrupt:
     print("Stopped by user")
-    # Also flush on Ctrl-C if a curve was in progress
-    if last_sample is not None and last_sample["motor"] == 1:
-        flush = dict(last_sample)
-        flush["motor"] = 0
-        client.publish(topic, orjson.dumps(build_payload(flush)), qos=1, retain=False)
-        print("Sent motor=0 flush after interrupt")
+    # Same stop signal on Ctrl-C so a partial run still closes the curve
+    if last_sample is not None:
+        publish_motor_stop(last_sample)
 
 finally:
     client.loop_stop()

@@ -232,11 +232,19 @@ export const WebSocketProvider = ({ children }) => {
 
         let nextIndentationStatus = null;
         parsedMessages.forEach((message) => {
-          if (!message || message.state == null || message.state === "") {
+          if (!message) {
             return;
           }
 
-          const currentState = Number(message.state);
+          // Prefer motor_working / motor (device stop signal). Fall back to
+          // legacy `state` so older firmware still closes the save session.
+          const activityRaw =
+            message.motor_working ?? message.motor ?? message.state;
+          if (activityRaw == null || activityRaw === "") {
+            return;
+          }
+
+          const currentState = Number(activityRaw);
 
           if (currentState !== 0 && currentState !== 1) {
             return;
@@ -245,6 +253,7 @@ export const WebSocketProvider = ({ children }) => {
           if (currentState === 1) {
             nextIndentationStatus = "Indentation in progress...";
           } else if (previousIndentationState.current === 1) {
+            // Falling edge 1 -> 0: motor stopped — curve is complete.
             nextIndentationStatus = "Indentation completed. Ready for the next test.";
           }
 
