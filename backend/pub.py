@@ -33,40 +33,45 @@ if points_per_batch <= 0 or total_points <= 0:
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
-# Curve model — fitted to processed_data_0.2kPa_S1_1.csv (10 curves):
-#   Z indent 0 -> ~32 um in ~0.55 um steps (57-60 points per curve),
-#   force ~142 uN at contact -> ~350 uN, where the indent stops (force limit).
-#   Noise: even/odd zigzag + random scatter, both growing with depth.
-# Internally um / uN; published in SI (m / N).
+# Curve model — shape taken from processed_data_0.2kPa 1.csv (10 curves),
+# rescaled to Z 0 -> ~30 um and force ~50 uN -> ~350 uN (force limit).
+#   In the CSV, force rises slowly then steeply (convex, ~power law), then
+#   flattens just before the limit; ~122 points per curve.
+#   Noise: even/odd zigzag + random scatter, both growing with force.
+# Internally um / uN; published in SI (m / N), both positive.
 # ---------------------------------------------------------------------------
-DISPLACEMENT_SIGN = -1          # set 1 if the backend expects positive displacement
+DISPLACEMENT_SIGN = 1           # positive displacement (set -1 if the backend expects negative)
 INCLUDE_RETRACT = True          # False -> only indent legs (what the CSV contains)
 
-# Mean force (uN) of the 10 reference curves at Z = 0, 1, 2 ... 31 um
-# (the last two show the flattening just before the force limit).
-TEMPLATE_UN = [
-    142.1, 144.6, 148.2, 152.2, 156.4, 159.9, 164.0, 167.9, 172.7, 177.5,
-    182.3, 186.5, 191.4, 197.1, 202.9, 208.8, 215.0, 220.9, 227.8, 235.1,
-    242.3, 249.7, 257.5, 265.9, 275.2, 284.7, 294.6, 305.1, 315.1, 326.6,
-    335.3, 340.4,
-]
-TEMPLATE_STEP_UM = 1.0
-TAIL_SLOPE_UN_PER_UM = 5.0      # extrapolation beyond the template
+Z_MAX_UM = 30.0                 # nominal depth reached at the force limit
+F_START_UN = 50.0               # contact force at Z = 0
+F_END_UN = 350.0                # force limit
 
-Z_STEP_UM = 0.5504              # sampling step in Z
-Z_STEP_SD_UM = 0.015
+# Normalized mean shape of the 10 reference curves:
+# g = (F - F0) / (Fend - F0) at u = Z / Zmax = 0, 0.05, 0.10 ... 1.0
+TEMPLATE_G = [
+    0.0000, 0.0119, 0.0283, 0.0457, 0.0667, 0.0892, 0.1154, 0.1432, 0.1737,
+    0.2072, 0.2446, 0.2865, 0.3324, 0.3846, 0.4412, 0.5083, 0.5862, 0.6749,
+    0.7823, 0.9082, 0.9963,
+]
+TEMPLATE_DU = 1.0 / (len(TEMPLATE_G) - 1)
+TAIL_SLOPE_G = 2.0              # extrapolation beyond u = 1 (normalized slope)
+
+POINTS_PER_CURVE = 122          # as in the CSV
+Z_STEP_UM = Z_MAX_UM / POINTS_PER_CURVE   # ~0.246 um
+Z_STEP_SD_UM = 0.007
 SKIP_PROB = 0.03                # occasional skipped sample (double step)
 
-F0_SD_UN = 1.0                  # contact force spread between curves
-SCALE_SD = 0.012                # stiffness spread between curves
+F0_SD_UN = 0.5                  # contact force spread between curves
+SCALE_SD = 0.02                 # stiffness spread between curves
 
 FORCE_STOP_UN = 341.0           # indent stops when the next point would exceed this ...
 FORCE_STOP_SD_UN = 1.5
-FINAL_FORCE_RANGE_UN = (341.0, 350.0)  # ... and a final point lands here, ~1.1 um further
-FINAL_STEP_UM = 1.1
+FINAL_FORCE_RANGE_UN = (341.0, 350.0)  # ... and a final point lands here, ~2 steps further
+FINAL_STEP_UM = 2 * Z_STEP_UM
 
-ZIGZAG_UN = (0.8, 0.05)         # alternating noise amplitude = a + b*z
-SCATTER_UN = (1.0, 0.08)        # gaussian noise SD = a + b*z
+ZIGZAG_UN = (0.6, 5.0)          # alternating noise amplitude = a + b*g  (g = 0..1)
+SCATTER_UN = (0.7, 2.5)         # gaussian noise SD           = a + b*g
 
 RESIDUAL_DEPTH_FRACTION = 0.15  # retract: force back at baseline at this depth fraction
 UNLOAD_EXPONENT = 1.8
@@ -75,16 +80,16 @@ UM_TO_M = 1e-6
 UN_TO_N = 1e-6
 
 
-def template_force(z):
-    """Mean reference force (uN) at Z (um), linear interpolation."""
-    if z <= 0:
-        return TEMPLATE_UN[0]
-    pos = z / TEMPLATE_STEP_UM
+def template_g(u):
+    """Normalized reference shape g(u), linear interpolation."""
+    if u <= 0:
+        return TEMPLATE_G[0]
+    pos = u / TEMPLATE_DU
     i = int(pos)
-    if i >= len(TEMPLATE_UN) - 1:
-        return TEMPLATE_UN[-1] + TAIL_SLOPE_UN_PER_UM * (z - (len(TEMPLATE_UN) - 1) * TEMPLATE_STEP_UM)
+    if i >= len(TEMPLATE_G) - 1:
+        return TEMPLATE_G[-1] + TAIL_SLOPE_G * (u - 1.0)
     t = pos - i
-    return TEMPLATE_UN[i] * (1 - t) + TEMPLATE_UN[i + 1] * t
+    return TEMPLATE_G[i] * (1 - t) + TEMPLATE_G[i + 1] * t
 
 
 def make_curve_params():
@@ -97,13 +102,14 @@ def make_curve_params():
 
 
 def clean_force(z, p):
-    base = TEMPLATE_UN[0]
-    return base + p["f0_offset"] + (template_force(z) - base) * p["scale"]
+    g = template_g(z / Z_MAX_UM)
+    return F_START_UN + p["f0_offset"] + (F_END_UN - F_START_UN) * g * p["scale"]
 
 
 def noisy(z, f, i, p):
-    zig = (ZIGZAG_UN[0] + ZIGZAG_UN[1] * z) * p["zig_phase"] * (-1) ** i
-    return f + zig + random.gauss(0.0, SCATTER_UN[0] + SCATTER_UN[1] * z)
+    g = max(0.0, (f - F_START_UN) / (F_END_UN - F_START_UN))
+    zig = (ZIGZAG_UN[0] + ZIGZAG_UN[1] * g) * p["zig_phase"] * (-1) ** i
+    return f + zig + random.gauss(0.0, SCATTER_UN[0] + SCATTER_UN[1] * g)
 
 
 def curve_samples():
