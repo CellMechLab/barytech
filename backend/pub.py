@@ -14,23 +14,25 @@ topic = "MON"
 def on_connect(client, userdata, flags, rc):
     print("Connected with result code:", rc)
 
-# CLI argument validation
-# points_per_batch  — messages published per second
-# total_points      — total messages to send (curves are streamed back-to-back)
-if len(sys.argv) != 3:
-    print("Usage: python publisher.py <points_per_batch> <total_points>")
+# CLI: python publisher.py <num_curves>
+#   num_curves — how many complete indent(+retract) curves to publish
+if len(sys.argv) != 2:
+    print("Usage: python publisher.py <num_curves>")
     sys.exit(1)
 
 try:
-    points_per_batch = int(sys.argv[1])
-    total_points = int(sys.argv[2])
+    num_curves = int(sys.argv[1])
 except ValueError:
-    print("Error: arguments must be integers.")
+    print("Error: <num_curves> must be an integer.")
     sys.exit(1)
 
-if points_per_batch <= 0 or total_points <= 0:
-    print("Error: arguments must be positive integers.")
+if num_curves <= 0:
+    print("Error: <num_curves> must be a positive integer.")
     sys.exit(1)
+
+# Publish rate (messages per second); one curve with retract is ~240 messages
+PUBLISH_RATE_HZ = 50
+CURVE_PAUSE_S = 1.0             # idle gap between curves
 
 # ---------------------------------------------------------------------------
 # Curve model — shape taken from processed_data_0.2kPa 1.csv (10 curves),
@@ -174,26 +176,6 @@ def curve_samples():
     return out
 
 
-def sample_stream():
-    """Endless stream of samples; after each curve, emit motor=0 to flush it.
-
-    Backend (_accumulate_curve_points) buffers while motor==1 and flushes the
-    curve on the falling edge 1 -> 0. Without that idle sample, completed
-    curves never leave the in-progress buffer.
-    """
-    while True:
-        curve = curve_samples()
-        yield from curve
-        # Repeat last pose with motor idle so the backend flushes this curve
-        last = curve[-1]
-        yield {
-            "z_um": last["z_um"],
-            "force_uN": last["force_uN"],
-            "phase": last["phase"],
-            "motor": 0,
-        }
-
-
 # Device credentials embedded in every published telemetry payload
 DEVICE_ID = "TsmfTUI5FCAf"
 DEVICE_TOKEN = "q23GeDPV02xybXxT"
@@ -219,57 +201,50 @@ client.on_connect = on_connect
 client.connect(broker, port, 60)
 client.loop_start()
 
-# Running count of published MQTT messages (includes motor=0 flush samples)
 total_messages_sent = 0
-# Last sample published; used to force motor=0 if we stop mid-curve
+interval = 1.0 / PUBLISH_RATE_HZ
+
+
+def publish(sample):
+    global total_messages_sent
+    client.publish(topic, orjson.dumps(build_payload(sample)), qos=1, retain=False)
+    total_messages_sent += 1
+
+
+# Last sample published; used to force motor=0 if interrupted mid-curve
 last_sample = None
-samples = sample_stream()
 
 try:
-    # Loop only while we still have points to send
-    while total_messages_sent < total_points:
-        start_time = time.time()
-        messages_sent = 0
-
-        for _ in range(points_per_batch):
-            if total_messages_sent >= total_points:
-                break
-
-            sample = next(samples)
-            payload = build_payload(sample)
-
-            # Use retain=False for streaming telemetry
-            info = client.publish(topic, orjson.dumps(payload), qos=1, retain=False)
-            # Optional: wait for QoS1 ack for each message (can be skipped for speed)
-            # info.wait_for_publish()
-
+    for n in range(1, num_curves + 1):
+        curve = curve_samples()
+        next_t = time.time()
+        for sample in curve:
+            publish(sample)
             last_sample = sample
-            messages_sent += 1
-            total_messages_sent += 1
+            next_t += interval
+            time.sleep(max(0.0, next_t - time.time()))
 
-        elapsed = time.time() - start_time
-        time.sleep(max(0, 1 - elapsed))
-        print(f"Sent {messages_sent} msgs this round, Total: {total_messages_sent}")
-
-    # If total_points cut us off mid-curve, send motor=0 so the backend flushes
-    if last_sample is not None and last_sample["motor"] == 1:
+        # Repeat last pose with motor idle so the backend flushes this curve
         flush = dict(last_sample)
         flush["motor"] = 0
-        client.publish(topic, orjson.dumps(build_payload(flush)), qos=1, retain=False)
-        print("Sent motor=0 flush for incomplete final curve")
+        publish(flush)
+        last_sample = flush
+        print(f"Curve {n}/{num_curves} sent ({len(curve)} points)")
 
-    print("All messages sent. Flushing in-flight publishes...")
+        if n < num_curves:
+            time.sleep(CURVE_PAUSE_S)
 
+    print(f"All {num_curves} curve(s) sent, {total_messages_sent} messages. Flushing in-flight publishes...")
     # Give a moment for any in-flight QoS1 messages to complete
     time.sleep(0.5)
 
 except KeyboardInterrupt:
     print("Stopped by user")
-    # Also flush on Ctrl-C if a curve was in progress
+    # Flush on Ctrl-C if a curve was in progress
     if last_sample is not None and last_sample["motor"] == 1:
         flush = dict(last_sample)
         flush["motor"] = 0
-        client.publish(topic, orjson.dumps(build_payload(flush)), qos=1, retain=False)
+        publish(flush)
         print("Sent motor=0 flush after interrupt")
 
 finally:
