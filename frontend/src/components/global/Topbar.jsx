@@ -105,7 +105,7 @@ const Topbar = () => {
         color={colors.grey[100]}
         sx={{ display: "flex", alignItems: "center", fontWeight: "bold" }}
       >
-        SCHAEFER SRL
+        SCHAEFER SEE SRL
       </Typography>
 
       {/* SEARCH BAR & STATUS ICONS */}
