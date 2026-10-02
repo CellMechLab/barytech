@@ -10,13 +10,13 @@ import ContactsOutlinedIcon from "@mui/icons-material/ContactsOutlined";
 import ReceiptOutlinedIcon from "@mui/icons-material/ReceiptOutlined";
 import PersonOutlinedIcon from "@mui/icons-material/PersonOutlined";
 import CalendarTodayOutlinedIcon from "@mui/icons-material/CalendarTodayOutlined";
-import HelpOutlineOutlinedIcon from "@mui/icons-material/HelpOutlineOutlined";
+// import HelpOutlineOutlinedIcon from "@mui/icons-material/HelpOutlineOutlined";
 import BarChartOutlinedIcon from "@mui/icons-material/BarChartOutlined";
 import PieChartOutlineOutlinedIcon from "@mui/icons-material/PieChartOutlineOutlined";
 import TimelineOutlinedIcon from "@mui/icons-material/TimelineOutlined";
 import MenuOutlinedIcon from "@mui/icons-material/MenuOutlined";
 import MapOutlinedIcon from "@mui/icons-material/MapOutlined";
-import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
+// import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 
 const Item = ({ title, to, icon, selected, setSelected }) => {
   const theme = useTheme();
@@ -123,6 +123,7 @@ const Sidebar = () => {
 
           <Box paddingLeft={isCollapsed ? undefined : "10%"}>
             <Item
+              title="Dashboard"
               to="/"
               icon={<HomeOutlinedIcon />}
               selected={selected}
@@ -138,12 +139,14 @@ const Sidebar = () => {
             </Typography>
            
             <Item
+              title="Sensors"
               to="/devices"
               icon={<ContactsOutlinedIcon />}
               selected={selected}
               setSelected={setSelected}
             />
             <Item
+              title="Device Data"
               to="/device-data"
               icon={<ReceiptOutlinedIcon />}
               selected={selected}
@@ -158,24 +161,29 @@ const Sidebar = () => {
               Pages
             </Typography>
             <Item
+              title="Add Device"
               to="/add-device"
               icon={<PersonOutlinedIcon />}
               selected={selected}
               setSelected={setSelected}
             />
-            <Item
+            {/* Admin panel nav hidden per product request */}
+            {/* <Item
+              title="Admin"
               to="/admin"
               icon={<AdminPanelSettingsIcon />}
               selected={selected}
               setSelected={setSelected}
-            />
+            /> */}
          
-            <Item
+            {/* FAQ nav hidden per product request */}
+            {/* <Item
+              title="FAQ"
               to="/faq"
               icon={<HelpOutlineOutlinedIcon />}
               selected={selected}
               setSelected={setSelected}
-            />
+            /> */}
           </Box>
         </Menu>
       </ProSidebar>
