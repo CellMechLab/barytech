@@ -213,7 +213,7 @@ const IoTDevices = () => {
 
   return (
     <Box m="20px">
-      <Header title="SENSORS" subtitle="List of Your IoT Devices" />
+      <Header title="SENSORS" subtitle="List of Sensors" />
       <Box
         m="40px 0 0 0"
         height="75vh"

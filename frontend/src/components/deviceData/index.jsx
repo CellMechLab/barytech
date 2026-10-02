@@ -61,8 +61,52 @@ const isDataRowId = (id) => {
   return false;
 };
 
+// Returns true when an id is a synthetic folder header row (e.g. "folder-3").
+const isFolderRowId = (id) => typeof id === "string" && id.startsWith("folder-");
+
+// Returns true when an id is a synthetic curve header row (e.g. "curve-3-0").
+const isCurveRowId = (id) => typeof id === "string" && id.startsWith("curve-");
+
 // Normalizes a data-row id to the integer expected by the delete API.
 const normalizeDataRowId = (id) => (typeof id === "string" ? Number(id) : id);
+
+// Parses "folder-3" / "folder-null" into a numeric folder id or null.
+const parseFolderRowId = (id) => {
+  if (!isFolderRowId(id)) return undefined;
+  const raw = id.slice("folder-".length);
+  return raw === "null" ? null : Number(raw);
+};
+
+// Parses "curve-3-0" / "curve-null-1" into { folderId, curveIndex }.
+const parseCurveRowId = (id) => {
+  if (!isCurveRowId(id)) return null;
+  // Match folder id (digits or "null") and trailing curve index.
+  const match = /^curve-(null|\d+)-(\d+)$/.exec(id);
+  if (!match) return null;
+  return {
+    folderId: match[1] === "null" ? null : Number(match[1]),
+    curveIndex: Number(match[2]),
+  };
+};
+
+// Collects every data-row id under one folder from the grouped API payload.
+const getDataIdsForFolder = (groupedData, folderId) => {
+  const folder = groupedData.find((f) =>
+    folderId == null ? f.folder_id == null : f.folder_id === folderId
+  );
+  if (!folder) return [];
+  return folder.curves.flatMap((curve) => curve.rows.map((row) => row.id));
+};
+
+// Collects every data-row id under one curve from the grouped API payload.
+const getDataIdsForCurve = (groupedData, folderId, curveIndex) => {
+  const folder = groupedData.find((f) =>
+    folderId == null ? f.folder_id == null : f.folder_id === folderId
+  );
+  const curve = folder?.curves.find((c) => c.curve_index === curveIndex);
+  if (!curve) return [];
+  return curve.rows.map((row) => row.id);
+};
 
 // ── Custom toolbar ────────────────────────────────────────────────────────────
 // Rendered inside the DataGrid toolbar slot. Receives folders list and theme
@@ -307,7 +351,27 @@ const DeviceDataTable = () => {
     });
   }, []);
 
+  // Refreshes the toolbar folder dropdown after a folder is removed.
+  const refreshFolders = useCallback(async () => {
+    try {
+      const token = sessionStorage.getItem("authToken");
+      if (!token) return;
+      const res = await axios.get(buildBackendUrl("/api/folders/"), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setFolders(res.data);
+    } catch (err) {
+      // Non-critical — table still refreshes even if the dropdown list fails.
+      console.error("[DeviceDataTable] folder refresh failed:", err);
+    }
+  }, []);
+
   // ── Delete handler ──────────────────────────────────────────────────────────
+  // Supports three selection kinds:
+  //   folder-*  → DELETE /api/folders/{id} (cascades curves + points)
+  //   curve-*   → collect point IDs under that curve, then DELETE /api/device-data/
+  //   numeric   → DELETE /api/device-data/ for those point IDs
+  // Ungrouped "folder-null" has no folder record, so its points are deleted by ID.
 
   const handleDelete = async () => {
     if (selectionModel.length === 0) {
@@ -327,25 +391,90 @@ const DeviceDataTable = () => {
         return;
       }
 
-      // Delete endpoint accepts an array of integer data-row IDs in the body.
-      await axios.delete(buildBackendUrl("/api/device-data/"), {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        data: { ids: selectionModel.map(normalizeDataRowId) },
+      // Auth headers shared by folder and point delete requests.
+      const authHeaders = {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      };
+
+      // Folder IDs that will be removed via the cascade folder endpoint.
+      const folderIdsToDelete = [];
+      // Point IDs to remove via the device-data bulk delete endpoint.
+      const pointIdsToDelete = new Set();
+      // Folder keys already covered by a folder delete — skip their nested selections.
+      const foldersCoveredByCascade = new Set();
+
+      selectionModel.forEach((id) => {
+        if (isFolderRowId(id)) {
+          const folderId = parseFolderRowId(id);
+          foldersCoveredByCascade.add(id);
+          if (folderId == null) {
+            // Ungrouped bucket: no Folder row exists, so delete its points by ID.
+            getDataIdsForFolder(groupedApiData, null).forEach((rowId) =>
+              pointIdsToDelete.add(rowId)
+            );
+          } else {
+            folderIdsToDelete.push(folderId);
+          }
+        }
       });
 
-      toast.success("Selected rows deleted successfully!", {
+      selectionModel.forEach((id) => {
+        if (isCurveRowId(id)) {
+          const parsed = parseCurveRowId(id);
+          if (!parsed) return;
+          // Skip curves already removed by a selected parent folder cascade.
+          if (foldersCoveredByCascade.has(folderKey(parsed.folderId))) return;
+          getDataIdsForCurve(groupedApiData, parsed.folderId, parsed.curveIndex).forEach(
+            (rowId) => pointIdsToDelete.add(rowId)
+          );
+          return;
+        }
+
+        if (isDataRowId(id)) {
+          const numericId = normalizeDataRowId(id);
+          // Skip points already removed by a selected parent folder cascade.
+          const parentFolder = groupedApiData.find((folder) =>
+            folder.curves.some((curve) =>
+              curve.rows.some((row) => row.id === numericId)
+            )
+          );
+          if (
+            parentFolder &&
+            foldersCoveredByCascade.has(folderKey(parentFolder.folder_id))
+          ) {
+            return;
+          }
+          pointIdsToDelete.add(numericId);
+        }
+      });
+
+      // Delete whole folders first so cascade removes their curves and points.
+      for (const folderId of folderIdsToDelete) {
+        await axios.delete(buildBackendUrl(`/api/folders/${folderId}`), {
+          headers: authHeaders,
+        });
+      }
+
+      // Delete remaining points (selected curves / individual rows / null-folder).
+      const pointIds = Array.from(pointIdsToDelete);
+      if (pointIds.length > 0) {
+        await axios.delete(buildBackendUrl("/api/device-data/"), {
+          headers: authHeaders,
+          data: { ids: pointIds },
+        });
+      }
+
+      toast.success("Selected items deleted successfully!", {
         style: { backgroundColor: "green", color: "white" },
       });
 
-      // Re-fetch so folder/curve row counts update automatically.
+      // Clear selection and reload both the tree and the export folder list.
       setSelectionModel([]);
-      await fetchGroupedData();
+      await Promise.all([fetchGroupedData(), refreshFolders()]);
     } catch (error) {
       console.error("Error deleting rows:", error);
-      toast.error("Failed to delete selected rows. Please try again.", {
+      toast.error("Failed to delete selected items. Please try again.", {
         style: { backgroundColor: "red", color: "white" },
       });
     }
@@ -407,12 +536,11 @@ const DeviceDataTable = () => {
     return rows;
   }, [groupedApiData, collapsedFolders, collapsedCurves]);
 
-  // ── Selection: only integer data-row IDs reach the selection model ──────────
+  // ── Selection: folders, curves, and points are all selectable for delete ───
 
   const handleSelectionChange = useCallback((ids) => {
-    // Keep ids in the same shape DataGrid emits so controlled checkboxes stay in sync.
-    const dataIds = ids.filter(isDataRowId);
-    setSelectionModel(dataIds);
+    // Keep folder/curve/data ids so collapsed headers can stay checked for cascade delete.
+    setSelectionModel(ids);
   }, []);
 
   // ── Columns ─────────────────────────────────────────────────────────────────
@@ -588,7 +716,7 @@ const DeviceDataTable = () => {
       disableColumnMenu: true,
       // Header renders the delete action button so it's always visible.
       renderHeader: () => (
-        <IconButton onClick={handleDelete} title="Delete Selected Rows">
+        <IconButton onClick={handleDelete} title="Delete selected folders, curves, or points">
           <DeleteIcon />
         </IconButton>
       ),
@@ -687,8 +815,8 @@ const DeviceDataTable = () => {
           columns={columns}
           checkboxSelection
           disableRowSelectionOnClick
-          // Prevent folder and curve rows from being checked.
-          isRowSelectable={(params) => !!params.row.isData}
+          // Folders and curves are selectable so cascade delete works without expanding them.
+          isRowSelectable={() => true}
           rowSelectionModel={selectionModel}
           onRowSelectionModelChange={handleSelectionChange}
           getRowId={(row) => row.id}
